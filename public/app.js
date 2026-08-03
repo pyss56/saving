@@ -445,6 +445,7 @@ async function parentTasks() {
         <div class="field"><input id="tk-title" placeholder="任务名称，如：打扫房间" required></div>
         <div class="field"><input id="tk-reward" type="number" step="0.5" min="0" placeholder="奖励金额(元，留空用模板价)"></div>
         <div class="field"><input id="tk-desc" placeholder="说明(可选)"></div>
+        <div class="field"><label><input id="tk-completed" type="checkbox"> 已完成（孩子已经做完，直接登记）</label></div>
         <button class="btn primary btn-block">发布</button>
       </form>
     </div>
@@ -643,11 +644,12 @@ async function childTasks() {
   }).join('');
   return `
     <div class="card">
-      <h3>🧹 申请任务（家长通过后可做，完成得奖励）</h3>
+      <h3>🧹 申请任务（默认已完成，家长审批后直接发奖励）</h3>
       <form onsubmit="applyTask(event)" class="vform">
         <div class="field"><input id="a-title" placeholder="我想做什么，如：帮爸爸擦车" required></div>
         <div class="field"><input id="a-reward" type="number" step="0.5" min="0.5" placeholder="期望奖励(元)" required></div>
         <div class="field"><input id="a-desc" placeholder="说明(可选)"></div>
+        <div class="field"><label><input id="a-completed" type="checkbox" checked> 已完成（家长审批后直接发放奖励）</label></div>
         <button class="btn primary btn-block">申请任务</button>
       </form>
     </div>
@@ -731,6 +733,7 @@ async function createTask(e) {
       title: document.getElementById('tk-title').value.trim(),
       reward_amount: rewardVal ? parseFloat(rewardVal) : 0,
       description: document.getElementById('tk-desc').value.trim(),
+      completed: document.getElementById('tk-completed').checked,
     };
     const r = await api('POST', '/tasks', body);
     alert(r.msg); render();
@@ -795,6 +798,7 @@ async function applyTask(e) {
       title: document.getElementById('a-title').value.trim(),
       reward_amount: parseFloat(document.getElementById('a-reward').value),
       description: document.getElementById('a-desc').value.trim(),
+      completed: document.getElementById('a-completed').checked,
     });
     alert(r.msg); render();
   } catch (err) { alert(err.message); }
@@ -806,11 +810,68 @@ async function completeTask(id) {
   } catch (err) { alert(err.message); }
 }
 
-/* ---------- PWA 注册 ---------- */
+/* ---------- PWA 注册 + 安装按钮 ---------- */
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('/sw.js').catch(() => { /* ignore */ });
   });
 }
+
+(function setupInstallButton() {
+  // 已以 App 方式运行则不再显示安装按钮
+  if (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) return;
+
+  const btn = document.createElement('button');
+  btn.id = 'pwa-install';
+  btn.style.display = 'none';
+  document.body.appendChild(btn);
+
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  let deferredPrompt = null;
+  let shown = false;
+
+  const showHint = () => {
+    if (shown) return;
+    shown = true;
+    btn.style.display = 'block';
+    btn.textContent = isIOS ? '📲 添加到主屏幕' : '📲 安装到桌面';
+    btn.onclick = () => {
+      if (isIOS) {
+        alert('iPhone/iPad 添加方式：点底部「分享」按钮 → 「添加到主屏幕」，即可像 App 一样用。');
+      } else {
+        alert('未检测到安装入口。请用 https 或 localhost 访问本站，再点浏览器菜单「安装应用 / 添加到主屏幕」。');
+      }
+    };
+  };
+
+  window.addEventListener('beforeinstallprompt', (e) => {
+    e.preventDefault();
+    deferredPrompt = e;
+    shown = true;
+    btn.style.display = 'block';
+    btn.textContent = '📲 安装到桌面';
+    btn.onclick = async () => {
+      btn.style.display = 'none';
+      try {
+        deferredPrompt.prompt();
+        await deferredPrompt.userChoice;
+      } catch (err) { /* 用户取消或已安装 */ }
+      deferredPrompt = null;
+      btn.style.display = 'none';
+    };
+  });
+
+  window.addEventListener('appinstalled', () => {
+    btn.style.display = 'none';
+    deferredPrompt = null;
+  });
+
+  if (isIOS) {
+    showHint();
+  } else {
+    // 一段时间后仍无可安装入口（如 http 局域网访问），显示操作指引
+    setTimeout(showHint, 6000);
+  }
+})();
 
 render();

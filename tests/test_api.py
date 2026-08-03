@@ -76,6 +76,54 @@ class SavingsApiTest(unittest.TestCase):
         acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
         self.assertAlmostEqual(acc['balance'], 22.5, places=2)  # 20 + 2.5
 
+    def test_parent_records_completed_task(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 家长直接登记一条“已完成”的任务（completed=true）
+        r = c.post('/api/tasks', headers=self.header(p),
+                   json={'child_id': child1['id'], 'title': '整理书包', 'reward_amount': 3,
+                         'completed': True})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '整理书包')
+        self.assertEqual(task['status'], 'completed')
+        self.assertIsNotNone(task['completed_at'])
+
+        # 家长确认发放
+        r = c.patch('/api/tasks/%d/review' % task['id'], headers=self.header(p),
+                    json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20 + 3, places=2)  # 初始20 + 3
+
+    def test_child_applies_completed_task(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+
+        # 儿童申请任务并勾选“已完成”
+        r = c.post('/api/tasks', headers=self.header(ch),
+                   json={'title': '帮爸爸擦车', 'reward_amount': 3, 'completed': True})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '帮爸爸擦车')
+        self.assertEqual(task['status'], 'pending')
+        self.assertIsNotNone(task['completed_at'])
+
+        # 家长审批通过 → 直接完成并发放奖励
+        r = c.patch('/api/tasks/%d/review' % task['id'], headers=self.header(p),
+                    json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '帮爸爸擦车')
+        self.assertEqual(task['status'], 'paid')
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20 + 3, places=2)  # 初始20 + 3
+
     def test_goal_and_withdraw(self):
         c = self.client
         p = self.auth('parent1')

@@ -103,6 +103,15 @@ h1, h2, h3 { font-weight: 700; }
 .btn-block { width: 100%; padding: 13px; font-size: 15px; }
 .btn-row { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
 .link { color: var(--primary-deep); font-size: 13px; margin-top: 12px; display: block; width: 100%; text-align: center; }
+/* PWA 安装按钮 */
+#pwa-install {
+  position: fixed; right: 14px; bottom: 74px; z-index: 40;
+  background: linear-gradient(135deg, var(--primary), var(--primary-deep));
+  color: #fff; border: none; border-radius: 999px;
+  padding: 10px 16px; font-size: 14px; font-weight: 600;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .18);
+}
+#pwa-install:active { transform: scale(.96); }
 .hint { font-size: 12px; color: var(--ink-light); margin-top: 8px; }
 .hint.center { text-align: center; }
 

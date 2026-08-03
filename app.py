@@ -860,18 +860,25 @@ def create_task():
         child_id = data.get('child_id')
         if not child_id or not is_child_of(g.user['id'], int(child_id)):
             return error('请选择已绑定的孩子')
+        # 家长可直接登记“已完成”的任务：completed=true 时跳过孩子标记完成，状态直接为 completed
+        completed = bool(data.get('completed'))
+        status = 'completed' if completed else 'active'
+        completed_at = now_str() if completed else None
         db.execute(
             "INSERT INTO tasks (parent_id, child_id, initiator, template_id, title, description, "
-            "reward_amount, status, created_at, approved_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "reward_amount, status, created_at, approved_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (g.user['id'], int(child_id), 'parent', template_id, title, data.get('description'),
-             reward, 'active', now_str(), now_str()),
+             reward, status, now_str(), now_str(), completed_at),
         )
     else:
+        # 儿童申请任务：completed=true 表示“已完成”，用 completed_at 做标记，家长审批后直接发奖励
+        completed = bool(data.get('completed'))
+        completed_at = now_str() if completed else None
         db.execute(
             "INSERT INTO tasks (parent_id, child_id, initiator, template_id, title, description, "
-            "reward_amount, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            "reward_amount, status, created_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
             (None, g.user['id'], 'child', template_id, title, data.get('description'),
-             reward, 'pending', now_str()),
+             reward, 'pending', now_str(), completed_at),
         )
     db.commit()
     return ok(msg='任务已创建')
@@ -908,8 +915,15 @@ def review_task(task_id):
     try:
         if task['status'] == 'pending':  # 孩子发起，家长审批
             if action == 'approve':
-                db.execute("UPDATE tasks SET status='active', parent_id=?, approved_at=? WHERE id=?",
-                           (g.user['id'], now_str(), task_id))
+                if task['completed_at']:  # 申请时已勾选“已完成”：审批通过即完成并发奖励
+                    credit(db, task['child_id'], float(task['reward_amount']), 'task_reward',
+                           description='任务奖励：' + task['title'],
+                           related_task_id=task_id, reviewed_by=g.user['id'])
+                    db.execute("UPDATE tasks SET status='paid', parent_id=?, approved_at=?, reviewed_at=? "
+                               "WHERE id=?", (g.user['id'], now_str(), now_str(), task_id))
+                else:
+                    db.execute("UPDATE tasks SET status='active', parent_id=?, approved_at=? WHERE id=?",
+                               (g.user['id'], now_str(), task_id))
             else:
                 db.execute("UPDATE tasks SET status='rejected', parent_id=?, reviewed_at=? WHERE id=?",
                            (g.user['id'], now_str(), task_id))
