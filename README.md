@@ -155,18 +155,33 @@ python -c "import app; app.init_db()"
 
 ---
 
-## 🐳 Docker 镜像（GitHub Actions）
+## 🐳 Docker 镜像（GitHub Actions → Docker Hub / GHCR）
 
 `.github/workflows/docker-build.yml` 会在推送到 `main` 或打 `v*` 标签时自动：
 
 1. 运行单元测试
-2. 构建镜像并推送到 **GHCR**（`ghcr.io/<owner>/saving`）
+2. 构建镜像并推送到 **Docker Hub**（`pyss56/saving`）与 **GHCR**（`ghcr.io/<owner>/saving`）
 3. 标签：`main`、`latest`、`sha-xxxx`、语义化版本
 
-拉取运行：
+### 配置 Docker Hub 凭据（仓库 Secrets）
+
+在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
+
+| Secret | 值 |
+|--------|-----|
+| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
+| `DOCKERHUB_TOKEN` | Docker Hub 访问令牌（Account Settings → Security → Access Tokens，需 `Read, Write, Delete` 权限） |
+
+> 未配置 `DOCKERHUB_TOKEN` 时，工作流仍会推送到 GHCR，不会失败。仓库名默认 `pyss56/saving`，可在仓库 **Variables** 里添加 `DOCKERHUB_REPO` 覆盖。
+
+### 拉取运行
 
 ```bash
+# 从 Docker Hub
+docker run -d -p 8000:8000 -v savings-data:/app/data pyss56/saving:latest
+
+# 从 GHCR
 docker run -d -p 8000:8000 -v savings-data:/app/data ghcr.io/<owner>/saving:latest
 ```
 
-> 提示：首次使用需在 GitHub 仓库 Settings → Actions 中允许 Workflow 权限写入 Packages（默认即可）。
+> 提示：GHCR 推送需在 GitHub 仓库 Settings → Actions 中允许 Workflow 权限写入 Packages（默认即可）。
