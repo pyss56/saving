@@ -8,6 +8,8 @@ import unittest
 _tmp = tempfile.mkdtemp()
 os.environ['DATA_DIR'] = _tmp
 os.environ['DB_PATH'] = os.path.join(_tmp, 'test.db')
+# 测试依赖 parent1/child1/child2 演示数据（生产默认不写入，只初始化一个家长账号）
+os.environ['SEED_DEMO'] = '1'
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

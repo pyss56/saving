@@ -75,7 +75,11 @@ def reset_db():
 
 
 def seed_if_empty():
-    """首次运行时写入演示账号与示例奖惩模板"""
+    """首次运行时初始化账号与示例奖惩模板。
+
+    生产默认只创建一个家长账号（用户名/密码可用 INIT_USERNAME / INIT_PASSWORD 环境变量覆盖）；
+    SEED_DEMO=1 时（测试用）额外写入 parent1 + child1/child2 演示数据。
+    """
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
     n = db.execute('SELECT COUNT(*) AS c FROM users').fetchone()['c']
@@ -83,22 +87,32 @@ def seed_if_empty():
         db.close()
         return
     now = now_str()
-    p1 = db.execute(
-        "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
-        ('parent1', generate_password_hash('123456'), '家长', 'parent', now),
-    ).lastrowid
-    c1 = db.execute(
-        "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
-        ('child1', generate_password_hash('123456'), '小明', 'child', now),
-    ).lastrowid
-    c2 = db.execute(
-        "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
-        ('child2', generate_password_hash('123456'), '小红', 'child', now),
-    ).lastrowid
-    db.executemany('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)',
-                   [(p1, c1), (p1, c2)])
-    db.executemany('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,?,?)',
-                   [(c1, 20.0, 0.02), (c2, 5.0, 0.03)])
+    if os.environ.get('SEED_DEMO') == '1':
+        # 测试/演示模式：写入演示家长与两个儿童
+        p1 = db.execute(
+            "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
+            ('parent1', generate_password_hash('123456'), '家长', 'parent', now),
+        ).lastrowid
+        c1 = db.execute(
+            "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
+            ('child1', generate_password_hash('123456'), '小明', 'child', now),
+        ).lastrowid
+        c2 = db.execute(
+            "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
+            ('child2', generate_password_hash('123456'), '小红', 'child', now),
+        ).lastrowid
+        db.executemany('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)',
+                       [(p1, c1), (p1, c2)])
+        db.executemany('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,?,?)',
+                       [(c1, 20.0, 0.02), (c2, 5.0, 0.03)])
+    else:
+        # 生产：只初始化一个家长账号（不写入任何账号密码到前端）
+        p1 = db.execute(
+            "INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)",
+            (os.environ.get('INIT_USERNAME', 'parent'),
+             generate_password_hash(os.environ.get('INIT_PASSWORD', '123456')),
+             '家长', 'parent', now),
+        ).lastrowid
     db.executemany(
         'INSERT INTO templates (parent_id, name, type, amount, description, icon) VALUES (?,?,?,?,?,?)',
         [

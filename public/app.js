@@ -162,7 +162,6 @@ function renderAuth() {
         <button class="btn primary btn-block" type="submit" id="f-submit">登 录</button>
       </form>
       <button class="link" onclick="toggleAuthMode()" id="f-toggle">没有账号？立即注册</button>
-      <p class="hint center">演示账号：家长 parent1 / 孩子 child1（密码均 123456）</p>
     </div>
   </div>`;
 }
