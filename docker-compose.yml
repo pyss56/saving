@@ -1,9 +1,6 @@
 services:
   savings:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: savings-bank:latest
+    image: pyss56/saving:latest
     container_name: savings-bank
     ports:
       - "8000:8000"
@@ -11,9 +8,12 @@ services:
       - PORT=8000
       - DATA_DIR=/app/data
     volumes:
-      # 命名卷持久化 SQLite 数据库
-      - savings-data:/app/data
+      # 数据挂载到宿主机目录：./data = docker-compose.yml 所在目录下的 data/，方便直接查看和备份
+      - ./data:/app/data
+      # 若想用 Docker 命名卷（数据在 Docker 内部），改用下面这行，并取消底部 volumes 的注释：
+      # - savings-data:/app/data
     restart: unless-stopped
 
-volumes:
-  savings-data:
+# 使用命名卷时取消下面注释：
+# volumes:
+#   savings-data:

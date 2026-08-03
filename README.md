@@ -25,58 +25,43 @@
 
 ---
 
-## 📁 目录结构
+## 🚀 快速部署（镜像已构建，无需本地构建）
 
-```
-├── app.py                    # Flask 后端（API + 静态前端 + 定时利息线程）
-├── schema.sql                # SQLite 表结构
-├── requirements.txt          # Python 依赖
-├── public/                   # 前端（PWA）
-│   ├── index.html
-│   ├── app.js
-│   ├── style.css
-│   ├── manifest.json
-│   ├── sw.js
-│   └── icons/                # 应用图标
-├── tools/generate_icons.py   # 图标生成脚本（纯标准库）
-├── tests/test_api.py         # 后端冒烟测试
-├── Dockerfile
-├── docker-compose.yml
-└── .github/workflows/docker-build.yml   # GitHub Actions 自动构建镜像
-```
+### 方式一：Docker 直接运行（推荐）
 
----
-
-## 🚀 快速开始
-
-### 方式一：Docker 运行（推荐）
+镜像已发布到 **Docker Hub**（`pyss56/saving:latest`），直接拉取即可：
 
 ```bash
-docker compose up -d --build
+docker run -d \
+  --name savings-bank \
+  -p 8000:8000 \
+  -v savings-data:/app/data \
+  --restart unless-stopped \
+  pyss56/saving:latest
+
 # 访问 http://localhost:8000
 ```
 
-数据持久化在命名卷 `savings-data`（SQLite 数据库位于容器内 `/app/data/savings.db`）。
+或用 `docker compose`（同样直接使用线上镜像，无需构建）：
 
-### 方式二：本地运行
+```bash
+docker compose up -d
+# 访问 http://localhost:8000
+```
+
+- 数据持久化在命名卷 `savings-data`（SQLite 数据库位于容器内 `/app/data/savings.db`），删除容器后数据不丢失。
+- `--restart unless-stopped`：开机 / 崩溃自动重启。
+
+### 方式二：本地运行（源码）
 
 ```bash
 # 1. 安装依赖
 pip install -r requirements.txt
 
-# 2. 生成 PWA 图标（可选，仓库已内置）
-python tools/generate_icons.py
-
-# 3. 启动（首次自动建库并写入演示数据）
+# 2. 启动（首次自动建库并写入演示数据）
 python app.py
 
-# 4. 访问 http://localhost:8000
-```
-
-### 运行测试
-
-```bash
-python -m unittest discover -s tests -p 'test_*.py' -v
+# 3. 访问 http://localhost:8000
 ```
 
 ---
@@ -103,85 +88,9 @@ python -m unittest discover -s tests -p 'test_*.py' -v
 
 ---
 
-## 📡 API 一览（前缀 `/api`）
+## 🛡️ 安全与数据（给使用者）
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | `/auth/register` | 注册（家长/儿童） |
-| POST | `/auth/login` | 登录，返回 token |
-| POST | `/auth/change-password` | 修改密码（需当前密码，改后其它设备 token 失效） |
-| GET | `/me` / `/me/account` | 当前用户 / 儿童账户 |
-| GET/POST | `/children` `/children/bind` | 家长查看/绑定孩子 |
-| PATCH/DELETE | `/children/<id>/rate` `/children/<id>` | 设单利率 / 解绑 |
-| GET/PUT | `/children/<id>/tiers` | 查看/保存活期阶梯利率 |
-| GET/PUT | `/children/<id>/term-tiers` | 查看/保存定期（时间）阶梯利率 |
-| POST | `/children/<id>/interest` `/interest/settle` | 结息 / 全局结息 |
-| POST | `/term-deposits` | 转存定期（活期转定期） |
-| GET | `/term-deposits` | 定期存款列表 |
-| POST | `/term-deposits/settle` | 结算到期定期 |
-| GET/POST | `/templates` | 奖惩模板列表/新增 |
-| PATCH/DELETE | `/templates/<id>` | 修改/删除模板 |
-| POST | `/children/<id>/punish` | 惩罚扣款（模板或自定义） |
-| GET/POST | `/tasks` | 任务列表 / 创建（家长布置或孩子申请） |
-| PATCH | `/tasks/<id>/complete` | 孩子标记完成 |
-| PATCH | `/tasks/<id>/review` | 家长审批 / 确认发放 |
-| GET/POST | `/goals` | 储蓄目标列表 / 新建 |
-| PATCH | `/goals/<id>/cancel` | 取消目标 |
-| GET/POST | `/transactions` | 流水列表 / 存钱·取钱·消费 |
-| GET | `/reviews` | 家长待审核（取钱/消费） |
-| PATCH | `/transactions/<id>/review` | 家长审核取钱/消费 |
-
-认证方式：登录后携带 `Authorization: Bearer <token>` 请求头（局域网轻量方案）。
-
----
-
-## 📦 数据库
-
-首次启动自动执行 `schema.sql` 建表，并写入演示数据。表：
-
-- `users` 用户（parent / child）
-- `parent_child` 家长-儿童绑定
-- `accounts` 储蓄账户（余额、年利率、上次结息）
-- `templates` 奖惩模板（每次价格）
-- `tasks` 家务/奖惩任务（双方向发起 + 状态机）
-- `goals` 储蓄目标
-- `transactions` 资金流水（取钱/消费待审核）
-
-手动初始化（可选）：
-
-```bash
-python -c "import app; app.init_db()"
-```
-
----
-
-## 🐳 Docker 镜像（GitHub Actions → Docker Hub / GHCR）
-
-`.github/workflows/docker-build.yml` 会在推送到 `main` 或打 `v*` 标签时自动：
-
-1. 运行单元测试
-2. 构建镜像并推送到 **Docker Hub**（`pyss56/saving`）与 **GHCR**（`ghcr.io/<owner>/saving`）
-3. 标签：`main`、`latest`、`sha-xxxx`、语义化版本
-
-### 配置 Docker Hub 凭据（仓库 Secrets）
-
-在 GitHub 仓库 **Settings → Secrets and variables → Actions** 添加：
-
-| Secret | 值 |
-|--------|-----|
-| `DOCKERHUB_USERNAME` | Docker Hub 用户名 |
-| `DOCKERHUB_TOKEN` | Docker Hub 访问令牌（Account Settings → Security → Access Tokens，需 `Read, Write, Delete` 权限） |
-
-> 未配置 `DOCKERHUB_TOKEN` 时，工作流仍会推送到 GHCR，不会失败。仓库名默认 `pyss56/saving`，可在仓库 **Variables** 里添加 `DOCKERHUB_REPO` 覆盖。
-
-### 拉取运行
-
-```bash
-# 从 Docker Hub
-docker run -d -p 8000:8000 -v savings-data:/app/data pyss56/saving:latest
-
-# 从 GHCR
-docker run -d -p 8000:8000 -v savings-data:/app/data ghcr.io/<owner>/saving:latest
-```
-
-> 提示：GHCR 推送需在 GitHub 仓库 Settings → Actions 中允许 Workflow 权限写入 Packages（默认即可）。
+- **改掉默认密码**：首次启动会自动创建演示账号（`parent1` / `child1` / `child2`，密码均为 `123456`）。正式使用请注册自己的账号，并修改默认密码（右上角「修改密码」，改后其它设备登录会失效）。
+- **数据都在数据库里**：账号、余额、任务、流水全部保存在 SQLite 数据库；Docker 方式运行时位于卷 `savings-data`（容器内 `/app/data/savings.db`）。
+- **备份 = 备份数据库**：直接备份 `savings.db` 文件（或备份 `savings-data` 卷）。恢复时把备份文件放回原位置并重启容器即可。
+- **别直接暴露公网**：系统内置的是局域网轻量 Bearer token 认证，适合家庭/内网使用；如需远程访问，建议走内网穿透或带认证的反向代理（如 Nginx + Basic Auth），不要裸奔到公网。
