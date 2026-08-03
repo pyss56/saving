@@ -1,0 +1,99 @@
+-- ============================================================
+-- 儿童储蓄记账系统 - SQLite 数据库结构
+-- 首次启动时由 app.py 自动执行；也可手动执行:
+--   sqlite3 data/savings.db < schema.sql
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS users (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  username      TEXT    NOT NULL UNIQUE,
+  password_hash TEXT    NOT NULL,
+  name          TEXT    NOT NULL,
+  role          TEXT    NOT NULL CHECK (role IN ('parent','child')),
+  created_at    TEXT    DEFAULT (datetime('now','localtime'))
+);
+
+-- 家长-儿童绑定关系
+CREATE TABLE IF NOT EXISTS parent_child (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  child_id  INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  UNIQUE (parent_id, child_id)
+);
+
+-- 儿童储蓄账户（interest_rate 为年利率，如 0.02 = 2%）
+CREATE TABLE IF NOT EXISTS accounts (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id         INTEGER UNIQUE NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  balance          REAL    NOT NULL DEFAULT 0,
+  interest_rate    REAL    NOT NULL DEFAULT 0.02,
+  last_interest_at TEXT
+);
+
+-- 奖惩模板：每个项目每次的价格
+CREATE TABLE IF NOT EXISTS templates (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name        TEXT    NOT NULL,
+  type        TEXT    NOT NULL CHECK (type IN ('reward','punish')),
+  amount      REAL    NOT NULL DEFAULT 0,
+  description TEXT,
+  icon        TEXT,
+  active      INTEGER NOT NULL DEFAULT 1
+);
+
+-- 家务任务/奖惩任务
+-- status: pending=孩子发起待审批, active=待完成, completed=待家长确认发放,
+--         paid=已发放, rejected=已驳回
+CREATE TABLE IF NOT EXISTS tasks (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_id     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  child_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  initiator     TEXT    NOT NULL DEFAULT 'parent' CHECK (initiator IN ('parent','child')),
+  template_id   INTEGER REFERENCES templates(id) ON DELETE SET NULL,
+  title         TEXT    NOT NULL,
+  description   TEXT,
+  reward_amount REAL    NOT NULL DEFAULT 0,
+  status        TEXT    NOT NULL DEFAULT 'pending',
+  created_at    TEXT    DEFAULT (datetime('now','localtime')),
+  approved_at   TEXT,
+  completed_at  TEXT,
+  reviewed_at   TEXT
+);
+
+-- 儿童储蓄目标
+CREATE TABLE IF NOT EXISTS goals (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id      INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name          TEXT    NOT NULL,
+  target_amount REAL    NOT NULL,
+  saved_amount  REAL    NOT NULL DEFAULT 0,
+  status        TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','achieved','cancelled')),
+  deadline      TEXT,
+  achieved_at   TEXT,
+  created_at    TEXT    DEFAULT (datetime('now','localtime'))
+);
+
+-- 资金流水：所有存钱/支出/奖励/利息/惩罚均形成记录
+-- type: task_reward 任务奖励, punish 惩罚扣款, save 存钱, withdraw 取钱,
+--       consume 消费, interest 利息, parent_deposit 家长存入
+-- amount 正数=收入, 负数=支出; status: pending=待家长审核, approved=已入账, rejected=已驳回
+CREATE TABLE IF NOT EXISTS transactions (
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  goal_id         INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+  type            TEXT    NOT NULL,
+  amount          REAL    NOT NULL,
+  balance_after   REAL,
+  description     TEXT,
+  status          TEXT    NOT NULL DEFAULT 'approved' CHECK (status IN ('pending','approved','rejected')),
+  related_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
+  reviewed_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
+  reviewed_at     TEXT,
+  created_at      TEXT    DEFAULT (datetime('now','localtime'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_transactions_child ON transactions (child_id);
+CREATE INDEX IF NOT EXISTS idx_tasks_child ON tasks (child_id);
+CREATE INDEX IF NOT EXISTS idx_goals_child ON goals (child_id);

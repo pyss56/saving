@@ -1,0 +1,19 @@
+services:
+  savings:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: savings-bank:latest
+    container_name: savings-bank
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      - DATA_DIR=/app/data
+    volumes:
+      # 命名卷持久化 SQLite 数据库
+      - savings-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  savings-data:
