@@ -327,9 +327,171 @@ def me():
 def my_account():
     db = get_db()
     acc = get_account(db, g.user['id'])
+    tiers = get_tiers(db, g.user['id'])
+    eff = effective_annual_rate(db, g.user['id'], float(acc['balance']))
+    term_tiers = get_term_tiers(db, g.user['id'])
+    deposits = [dict(r) for r in db.execute(
+        'SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
+        (g.user['id'],)).fetchall()]
+    term_balance = round(sum(float(d['amount']) for d in deposits if d['status'] == 'active'), 2)
     return ok(account={'id': acc['id'], 'child_id': acc['child_id'],
                        'balance': acc['balance'], 'interest_rate': acc['interest_rate'],
-                       'last_interest_at': acc['last_interest_at']})
+                       'last_interest_at': acc['last_interest_at'],
+                       'tiers': tiers, 'effective_rate': eff,
+                       'term_tiers': term_tiers, 'term_deposits': deposits,
+                       'term_balance': term_balance})
+
+
+# ---------------- 阶梯利率配置 ----------------
+@app.route('/api/children/<int:child_id>/tiers')
+@require_parent
+def get_tiers_api(child_id):
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    return ok(tiers=get_tiers(get_db(), child_id))
+
+
+@app.route('/api/children/<int:child_id>/tiers', methods=['PUT'])
+@require_parent
+def set_tiers_api(child_id):
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    data = request.get_json(silent=True) or {}
+    tiers = data.get('tiers')
+    if tiers is None:
+        return error('缺少 tiers 参数')
+    parsed = []
+    for t in tiers:
+        try:
+            mn = round(float(t.get('min_amount') or 0), 2)
+            rate = round(float(t.get('rate') or 0), 4)
+        except (TypeError, ValueError):
+            return error('阶梯数据格式不正确')
+        if mn < 0 or not (0 <= rate <= 1):
+            return error('金额需 ≥ 0，利率需在 0~1 之间')
+        parsed.append((mn, rate))
+    parsed.sort(key=lambda x: x[0])
+    dedup = []
+    for mn, rate in parsed:
+        if dedup and abs(dedup[-1][0] - mn) < 0.005:
+            dedup[-1] = (mn, rate)
+        else:
+            dedup.append((mn, rate))
+    db = get_db()
+    db.execute('DELETE FROM interest_tiers WHERE child_id=?', (child_id,))
+    db.executemany(
+        'INSERT INTO interest_tiers (child_id, min_amount, rate) VALUES (?,?,?)',
+        [(child_id, mn, rate) for mn, rate in dedup])
+    db.commit()
+    return ok(msg='阶梯利率已保存', tiers=[{'min_amount': m, 'rate': r} for m, r in dedup])
+
+
+# ---------------- 定期利率阶梯（时间阶梯） ----------------
+@app.route('/api/children/<int:child_id>/term-tiers')
+@require_parent
+def get_term_tiers_api(child_id):
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    return ok(tiers=get_term_tiers(get_db(), child_id))
+
+
+@app.route('/api/children/<int:child_id>/term-tiers', methods=['PUT'])
+@require_parent
+def set_term_tiers_api(child_id):
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    data = request.get_json(silent=True) or {}
+    tiers = data.get('tiers')
+    if tiers is None:
+        return error('缺少 tiers 参数')
+    parsed = []
+    for t in tiers:
+        try:
+            mn = int(float(t.get('min_days') or 0))
+            rate = round(float(t.get('rate') or 0), 4)
+        except (TypeError, ValueError):
+            return error('阶梯数据格式不正确')
+        if mn < 0 or not (0 <= rate <= 1):
+            return error('天数需 ≥ 0，利率需在 0~1 之间')
+        parsed.append((mn, rate))
+    parsed.sort(key=lambda x: x[0])
+    dedup = []
+    for mn, rate in parsed:
+        if dedup and dedup[-1][0] == mn:
+            dedup[-1] = (mn, rate)
+        else:
+            dedup.append((mn, rate))
+    db = get_db()
+    db.execute('DELETE FROM term_tiers WHERE child_id=?', (child_id,))
+    db.executemany('INSERT INTO term_tiers (child_id, min_days, rate) VALUES (?,?,?)',
+                   [(child_id, mn, rate) for mn, rate in dedup])
+    db.commit()
+    return ok(msg='定期利率已保存', tiers=[{'min_days': m, 'rate': r} for m, r in dedup])
+
+
+# ---------------- 定期存款 ----------------
+@app.route('/api/term-deposits', methods=['POST'])
+@require_child
+def create_term_deposit():
+    data = request.get_json(silent=True) or {}
+    try:
+        amount = round(float(data.get('amount') or 0), 2)
+        term_days = int(data.get('term_days') or 0)
+    except (TypeError, ValueError):
+        return error('金额或期限格式不正确')
+    if amount <= 0:
+        return error('金额需大于 0')
+    if term_days < 1:
+        return error('存期至少 1 天')
+    db = get_db()
+    acc = get_account(db, g.user['id'])
+    if float(acc['balance']) < amount:
+        return error('活期余额不足')
+    rate = term_rate_for_days(db, g.user['id'], term_days)
+    start = now_str()
+    mature = (datetime.datetime.now() + datetime.timedelta(days=term_days)).strftime('%Y-%m-%d %H:%M:%S')
+    new_balance = round(float(acc['balance']) - amount, 2)
+    db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
+    db.execute(
+        'INSERT INTO term_deposits (child_id, account_id, amount, rate, term_days, start_at, '
+        'mature_at, status) VALUES (?,?,?,?,?,?,?,?)',
+        (g.user['id'], acc['id'], amount, rate, term_days, start, mature, 'active'))
+    db.execute(
+        "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, description, "
+        "status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+        (g.user['id'], acc['id'], 'term_in', -amount, new_balance,
+         f'转存定期 {term_days} 天（年利率 {rate*100:.1f}%）', 'approved', start))
+    db.commit()
+    return ok(msg=f'已转存定期 {term_days} 天，年利率 {rate*100:.1f}%，到期自动还本付息',
+              rate=rate, mature_at=mature)
+
+
+@app.route('/api/term-deposits')
+@require_auth
+def list_term_deposits():
+    db = get_db()
+    if g.user['role'] == 'child':
+        rows = db.execute('SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
+                          (g.user['id'],)).fetchall()
+    else:
+        rows = db.execute(
+            'SELECT * FROM term_deposits WHERE child_id IN '
+            '(SELECT child_id FROM parent_child WHERE parent_id=?) ORDER BY id DESC',
+            (g.user['id'],)).fetchall()
+    return ok(deposits=[dict(r) for r in rows])
+
+
+@app.route('/api/term-deposits/settle', methods=['POST'])
+@require_auth
+def settle_term_deposits():
+    db = get_db()
+    child_id = g.user['id'] if g.user['role'] == 'child' else None
+    count, interest = mature_due_deposits(db, child_id)
+    db.commit()
+    if count:
+        return ok(msg=f'已结算 {count} 笔到期定期，利息 {interest:.2f} 元',
+                  count=count, interest=round(interest, 2))
+    return ok(msg='没有到期的定期存款', count=0)
 
 
 # ---------------- 家长-孩子绑定 ----------------
@@ -344,7 +506,19 @@ def list_children():
         'LEFT JOIN accounts a ON a.child_id=u.id WHERE pc.parent_id=?',
         (g.user['id'],),
     ).fetchall()
-    return ok(children=[dict(r) for r in rows])
+    term_rows = db.execute(
+        "SELECT child_id, SUM(amount) AS s FROM term_deposits WHERE status='active' "
+        'GROUP BY child_id').fetchall()
+    term_map = {r['child_id']: float(r['s']) for r in term_rows}
+    children = []
+    for r in rows:
+        item = dict(r)
+        item['tiers'] = get_tiers(db, r['id'])
+        item['effective_rate'] = effective_annual_rate(db, r['id'], float(r['balance']))
+        item['term_balance'] = round(term_map.get(r['id'], 0.0), 2)
+        item['term_tiers'] = get_term_tiers(db, r['id'])
+        children.append(item)
+    return ok(children=children)
 
 
 @app.route('/api/children/bind', methods=['POST'])
@@ -393,11 +567,61 @@ def set_rate(child_id):
     return ok(msg='利率已更新')
 
 
+def get_tiers(db, child_id):
+    """查询某孩子的阶梯利率（按 min_amount 升序）"""
+    rows = db.execute(
+        'SELECT id, min_amount, rate FROM interest_tiers WHERE child_id=? '
+        'ORDER BY min_amount ASC', (child_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def tier_daily_interest(db, child_id, balance):
+    """按阶梯计算当日利息（年利率/365，区间边际计息）。
+    无阶梯配置时退回账户单利率。
+    """
+    balance = float(balance)
+    if balance <= 0:
+        return 0.0
+    tiers = get_tiers(db, child_id)
+    acc = db.execute('SELECT interest_rate FROM accounts WHERE child_id=?',
+                     (child_id,)).fetchone()
+    default_rate = float(acc['interest_rate']) if acc else 0.02
+    if not tiers:
+        return balance * default_rate / 365
+    total = 0.0
+    prev = 0.0
+    n = len(tiers)
+    for i, t in enumerate(tiers):
+        top = float(tiers[i + 1]['min_amount']) if i + 1 < n else None
+        upper = top if top is not None else balance
+        low = max(prev, 0.0)
+        if balance <= low:
+            break
+        portion = min(balance, upper) - low
+        if portion > 0:
+            total += portion * float(t['rate']) / 365
+        prev = upper
+        if top is None:
+            break
+    return total
+
+
+def effective_annual_rate(db, child_id, balance):
+    """基于当前余额折算的综合年利率（阶梯计息 / 余额 * 365）"""
+    balance = float(balance)
+    if balance <= 0:
+        acc = db.execute('SELECT interest_rate FROM accounts WHERE child_id=?',
+                         (child_id,)).fetchone()
+        return float(acc['interest_rate']) if acc else 0.02
+    daily = tier_daily_interest(db, child_id, balance)
+    return round(daily * 365 / balance, 4)
+
+
 def settle_interest_for_account(db, acc):
-    """按日利率 = 年利率/365 结算单账户利息。"""
+    """按日利率结算单账户利息（支持阶梯）。"""
     if float(acc['balance']) <= 0:
         return 0.0
-    interest = round(float(acc['balance']) * float(acc['interest_rate']) / 365, 2)
+    interest = round(tier_daily_interest(db, acc['child_id'], float(acc['balance'])), 2)
     if interest <= 0:
         return 0.0
     new_balance = round(float(acc['balance']) + interest, 2)
@@ -411,15 +635,77 @@ def settle_interest_for_account(db, acc):
     return interest
 
 
+def get_term_tiers(db, child_id):
+    """定期利率阶梯（时间阶梯）：按存期天数分段，存期越长利率越高"""
+    rows = db.execute(
+        'SELECT id, min_days, rate FROM term_tiers WHERE child_id=? '
+        'ORDER BY min_days ASC', (child_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def term_rate_for_days(db, child_id, days):
+    """根据存期天数选择定期利率（min_days <= days 的最高档）"""
+    tiers = [dict(r) for r in db.execute(
+        'SELECT min_days, rate FROM term_tiers WHERE child_id=? '
+        'ORDER BY min_days ASC', (child_id,)).fetchall()]
+    acc = db.execute('SELECT interest_rate FROM accounts WHERE child_id=?',
+                     (child_id,)).fetchone()
+    default = float(acc['interest_rate']) if acc else 0.02
+    chosen = default
+    for t in tiers:
+        if days >= int(t['min_days']):
+            chosen = float(t['rate'])
+    return chosen
+
+
+def mature_due_deposits(db, child_id=None):
+    """结算到期的定期存款：返还本金 + 发放定期利息。
+    返回 (到期笔数, 发放利息合计)。child_id 为 None 时结算所有孩子。
+    """
+    now = now_str()
+    if child_id is None:
+        deps = db.execute(
+            "SELECT * FROM term_deposits WHERE status='active' AND mature_at <= ?",
+            (now,)).fetchall()
+    else:
+        deps = db.execute(
+            "SELECT * FROM term_deposits WHERE child_id=? AND status='active' AND mature_at <= ?",
+            (child_id, now)).fetchall()
+    count = 0
+    interest_sum = 0.0
+    for d in deps:
+        interest = round(float(d['amount']) * float(d['rate']) * int(d['term_days']) / 365, 2)
+        total = round(float(d['amount']) + interest, 2)
+        acc = db.execute('SELECT * FROM accounts WHERE id=?', (d['account_id'],)).fetchone()
+        new_balance = round(float(acc['balance']) + total, 2)
+        db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
+        db.execute("UPDATE term_deposits SET status='matured' WHERE id=?", (d['id'],))
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_out', float(d['amount']), new_balance,
+             '定期到期·本金返还', 'approved', now))
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_interest', interest, new_balance,
+             '定期利息', 'approved', now))
+        count += 1
+        interest_sum += interest
+    return count, interest_sum
+
+
 def settle_all_interest():
+    """结算活期利息 + 到期定期，返回 (活期利息合计, 到期笔数, 定期利息合计)"""
     db = sqlite3.connect(DB_PATH)
     db.row_factory = sqlite3.Row
-    total = 0.0
+    demand_total = 0.0
     for acc in db.execute('SELECT * FROM accounts').fetchall():
-        total += settle_interest_for_account(db, acc)
+        demand_total += settle_interest_for_account(db, acc)
+    matured, term_interest = mature_due_deposits(db)
     db.commit()
     db.close()
-    return total
+    return demand_total, matured, term_interest
 
 
 @app.route('/api/children/<int:child_id>/interest', methods=['POST'])
@@ -438,8 +724,12 @@ def settle_child_interest(child_id):
 @app.route('/api/interest/settle', methods=['POST'])
 @require_parent
 def settle_interest():
-    total = settle_all_interest()
-    return ok(msg=f'结算完成，共发放利息 {total:.2f} 元', total=round(total, 2))
+    demand, matured, term_int = settle_all_interest()
+    msg = f'活期利息 {demand:.2f} 元'
+    if matured:
+        msg += f'，到期定期 {matured} 笔（利息 {term_int:.2f} 元）'
+    return ok(msg=msg, demand=round(demand, 2), matured=matured,
+              term_interest=round(term_int, 2))
 
 
 # ---------------- 奖惩模板 ----------------

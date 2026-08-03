@@ -1,7 +1,7 @@
 {
   "name": "儿童储蓄银行",
   "short_name": "储蓄银行",
-  "description": "管理奖惩、引导孩子储蓄记账",
+  "description": "亲子储蓄小天地",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

@@ -20,11 +20,14 @@ const fmtDate = (s) => (s ? String(s).slice(5, 16) : '');
 
 const TYPE_LABEL = {
   task_reward: '任务奖励', punish: '惩罚扣款', save: '存钱',
-  withdraw: '取钱', consume: '消费', interest: '利息', parent_deposit: '家长存入',
+  withdraw: '取钱', consume: '消费', interest: '活期利息',
+  term_in: '转存定期', term_out: '定期到期', term_interest: '定期利息',
+  parent_deposit: '家长存入',
 };
 const TYPE_ICON = {
   task_reward: '🎖️', punish: '🚫', save: '💰', withdraw: '🏦',
-  consume: '🛒', interest: '✨', parent_deposit: '👛',
+  consume: '🛒', interest: '✨', term_in: '🏦', term_out: '💵',
+  term_interest: '⭐', parent_deposit: '👛',
 };
 const TASK_STATUS = {
   pending: '待家长审批', active: '待完成', completed: '待家长确认', paid: '已发放', rejected: '已驳回',
@@ -148,7 +151,7 @@ function renderAuth() {
     <div class="auth-card">
       <div class="auth-logo">🐷</div>
       <h1>儿童储蓄银行</h1>
-      <p class="auth-sub">管理奖惩 · 引导孩子储蓄</p>
+      <p class="auth-sub">亲子储蓄小天地</p>
       <form onsubmit="authSubmit(event)" class="vform">
         <div class="field"><input id="f-username" placeholder="用户名" autocomplete="username" required></div>
         <div class="field"><input id="f-password" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password" required></div>
@@ -231,6 +234,7 @@ async function parentOverview() {
 
 async function parentChildren() {
   const c = await api('GET', '/children');
+  window.__childrenData = c.children; // 供阶梯利率弹窗读取
   return `
     <div class="card">
       <h3>👨‍👧 绑定孩子</h3>
@@ -245,17 +249,130 @@ async function parentChildren() {
           <div class="avatar">${esc(ch.name[0])}</div>
           <div class="row-main">
             <div class="row-title">${esc(ch.name)} <span class="tag">${esc(ch.username)}</span></div>
-            <div class="row-sub">余额 ${money(ch.balance)} · 年利率 ${(Number(ch.interest_rate) * 100).toFixed(1)}%</div>
+            <div class="row-sub">活期 ${money(ch.balance)}${ch.term_balance > 0 ? ` · 定期 ${money(ch.term_balance)}` : ''} · ${rateLabel(ch)}</div>
           </div>
         </div>
         <div class="btn-row">
-          <button class="btn" onclick="setRateModal(${ch.id},${ch.interest_rate})">利率</button>
+          <button class="btn" onclick="tierModal(${ch.id})">📈 活期利率</button>
+          <button class="btn" onclick="termTierModal(${ch.id})">⏱ 定期利率</button>
           <button class="btn" onclick="settleInterest(${ch.id})">结息</button>
           <button class="btn warn" onclick="punishModal(${ch.id},'${esc(ch.name)}')">惩罚</button>
           <button class="btn ghost" onclick="unbindChild(${ch.id})">解绑</button>
         </div>
       </div>`).join('')}
     <p class="hint">孩子先注册账号，再用其用户名在此绑定。</p>`;
+}
+
+function rateLabel(ch) {
+  const eff = ch.effective_rate != null
+    ? (Number(ch.effective_rate) * 100).toFixed(1)
+    : (Number(ch.interest_rate) * 100).toFixed(1);
+  if (ch.tiers && ch.tiers.length) return `阶梯 ${ch.tiers.length} 档 · 当前综合 ${eff}%`;
+  return `年利率 ${eff}%`;
+}
+
+/* ---------- 阶梯利率配置 ---------- */
+function tierModal(childId) {
+  const ch = (window.__childrenData || []).find((x) => x.id === childId) || {};
+  const tiers = (ch.tiers && ch.tiers.length)
+    ? ch.tiers.map((t) => ({ min_amount: Number(t.min_amount), rate: Number(t.rate) }))
+    : [{ min_amount: 0, rate: Number(ch.interest_rate) || 0.02 }];
+  window.__tierRows = tiers;
+  openModal(`
+    <h3>📈 阶梯利率 · ${esc(ch.name || '')}</h3>
+    <p class="hint">按余额分段计息：处于某档区间内的那部分钱，按该档年利率计息（日利息 = 年利率 ÷ 365）。</p>
+    <div id="tier-rows"></div>
+    <div class="btn-row">
+      <button class="btn" onclick="addTierRow()">＋ 添加一档</button>
+      <button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn ok" onclick="saveTiers(${childId})">保存</button>
+    </div>`);
+  renderTierRows();
+}
+function renderTierRows() {
+  const el = document.getElementById('tier-rows');
+  if (!el) return;
+  el.innerHTML = window.__tierRows.map((r, i) => `
+    <div class="field-row tier-row">
+      <span class="tier-symbol">≥</span>
+      <input class="tier-min" type="number" step="1" min="0" value="${r.min_amount}" placeholder="金额"
+        onchange="window.__tierRows[${i}].min_amount = parseFloat(this.value) || 0">
+      <span class="tier-symbol">元</span>
+      <span class="tier-arrow">→</span>
+      <input class="tier-rate" type="number" step="0.1" min="0" max="100" value="${(r.rate * 100).toFixed(1)}" placeholder="%"
+        onchange="window.__tierRows[${i}].rate = (parseFloat(this.value) || 0) / 100">
+      <span class="tier-symbol">%</span>
+      <button class="btn ghost" onclick="removeTierRow(${i})">✕</button>
+    </div>`).join('');
+}
+function addTierRow() { window.__tierRows.push({ min_amount: 0, rate: 0.02 }); renderTierRows(); }
+function removeTierRow(i) { window.__tierRows.splice(i, 1); renderTierRows(); }
+async function saveTiers(childId) {
+  try {
+    const tiers = window.__tierRows.map((r) => ({ min_amount: r.min_amount, rate: r.rate }));
+    const r = await api('PUT', '/children/' + childId + '/tiers', { tiers });
+    closeModal(); alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
+
+/* ---------- 定期利率（时间阶梯）配置 ---------- */
+function termTierModal(childId) {
+  const ch = (window.__childrenData || []).find((x) => x.id === childId) || {};
+  const tiers = (ch.term_tiers && ch.term_tiers.length)
+    ? ch.term_tiers.map((t) => ({ min_days: Number(t.min_days), rate: Number(t.rate) }))
+    : [{ min_days: 0, rate: Number(ch.interest_rate) || 0.02 }];
+  window.__termRows = tiers;
+  openModal(`
+    <h3>⏱ 定期利率 · ${esc(ch.name || '')}</h3>
+    <p class="hint">存期达到对应天数时使用该档年利率，存期越长利率越高。</p>
+    <div id="term-rows"></div>
+    <div class="btn-row">
+      <button class="btn" onclick="addTermRow()">＋ 添加一档</button>
+      <button class="btn ghost" onclick="closeModal()">取消</button>
+      <button class="btn ok" onclick="saveTermTiers(${childId})">保存</button>
+    </div>`);
+  renderTermRows();
+}
+function renderTermRows() {
+  const el = document.getElementById('term-rows');
+  if (!el) return;
+  el.innerHTML = window.__termRows.map((r, i) => `
+    <div class="field-row tier-row">
+      <span class="tier-symbol">≥</span>
+      <input class="tier-min" type="number" step="1" min="0" value="${r.min_days}" placeholder="天数"
+        onchange="window.__termRows[${i}].min_days = parseInt(this.value) || 0">
+      <span class="tier-symbol">天</span>
+      <span class="tier-arrow">→</span>
+      <input class="tier-rate" type="number" step="0.1" min="0" max="100" value="${(r.rate * 100).toFixed(1)}" placeholder="%"
+        onchange="window.__termRows[${i}].rate = (parseFloat(this.value) || 0) / 100">
+      <span class="tier-symbol">%</span>
+      <button class="btn ghost" onclick="removeTermRow(${i})">✕</button>
+    </div>`).join('');
+}
+function addTermRow() { window.__termRows.push({ min_days: 0, rate: 0.02 }); renderTermRows(); }
+function removeTermRow(i) { window.__termRows.splice(i, 1); renderTermRows(); }
+async function saveTermTiers(childId) {
+  try {
+    const tiers = window.__termRows.map((r) => ({ min_days: r.min_days, rate: r.rate }));
+    const r = await api('PUT', '/children/' + childId + '/term-tiers', { tiers });
+    closeModal(); alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
+
+/* ---------- 定期存款 ---------- */
+async function createTermDeposit(e) {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/term-deposits', {
+      amount: parseFloat(document.getElementById('td-amount').value),
+      term_days: parseInt(document.getElementById('td-days').value, 10),
+    });
+    alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
+async function settleTerm() {
+  try { const r = await api('POST', '/term-deposits/settle'); alert(r.msg); render(); }
+  catch (err) { alert(err.message); }
 }
 
 async function parentTemplates() {
@@ -384,12 +501,16 @@ async function childOverview() {
   const [accData, goalsData] = await Promise.all([api('GET', '/me/account'), api('GET', '/goals')]);
   const acc = accData.account;
   const active = goalsData.goals.filter((g) => g.status === 'active');
+  const rateText = (acc.tiers && acc.tiers.length)
+    ? `阶梯利率 · 当前综合 ${(Number(acc.effective_rate) * 100).toFixed(1)}%`
+    : `年利率 ${(Number(acc.interest_rate) * 100).toFixed(1)}%`;
+  const termText = acc.term_balance > 0 ? ` · 定期 ${money(acc.term_balance)}` : '';
   return `
     <div class="hero">
       <div class="hero-emoji">🐷</div>
       <div class="hero-label">我的储蓄罐</div>
       <div class="hero-balance">${money(acc.balance)}</div>
-      <div class="hero-sub">年利率 ${(Number(acc.interest_rate) * 100).toFixed(1)}% · 存钱会生利息哦</div>
+      <div class="hero-sub">活期余额${termText} · ${rateText}</div>
     </div>
     <div class="quick-grid">
       <button class="quick" onclick="setTab('money')">💰 存取钱</button>
@@ -408,14 +529,26 @@ async function childOverview() {
       </div>`).join('') || '<div class="empty">还没有储蓄目标，去「目标」页创建一个吧 🎯</div>'}`;
 }
 
+const isMatured = (d) => new Date(String(d.mature_at).replace(' ', 'T')) <= new Date();
+function termDaysOptions(termTiers) {
+  let days = termTiers && termTiers.length ? termTiers.map((t) => Number(t.min_days)) : [7, 30, 90, 365];
+  days = [...new Set(days)].filter((d) => d > 0).sort((a, b) => a - b);
+  if (!days.length) days = [7, 30, 90, 365];
+  return days.map((d) => `<option value="${d}">${d} 天</option>`).join('');
+}
+
 async function childMoney() {
   const accData = await api('GET', '/me/account');
+  const acc = accData.account;
   const goals = (await api('GET', '/goals')).goals.filter((g) => g.status === 'active');
   const goalOpts = '<option value="">不关联目标</option>' +
     goals.map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
+  const deposits = (acc.term_deposits || []).filter((d) => d.status === 'active');
   const recent = (await api('GET', '/transactions')).transactions.slice(0, 5);
+  const dayOptions = termDaysOptions(acc.term_tiers);
   return `
-    <div class="card balance-card">当前余额 <b>${money(accData.account.balance)}</b></div>
+    <div class="card balance-card"><span>活期余额</span><b>${money(acc.balance)}</b></div>
+    ${acc.term_balance > 0 ? `<div class="card balance-card"><span>定期合计</span><b>${money(acc.term_balance)}</b></div>` : ''}
     <div class="card">
       <h3>💰 存钱</h3>
       <form onsubmit="saveMoney(event)" class="vform">
@@ -425,6 +558,27 @@ async function childMoney() {
         <button class="btn ok btn-block">存入储蓄罐</button>
       </form>
     </div>
+    <div class="card">
+      <h3>🏦 定期存款（锁定期内不能取，到期自动还本付息）</h3>
+      <form onsubmit="createTermDeposit(event)" class="vform">
+        <div class="field"><div class="field-row">
+          <input id="td-amount" type="number" step="0.5" min="0.5" placeholder="转存金额(元)" required>
+          <select id="td-days">${dayOptions}</select>
+        </div></div>
+        <button class="btn primary btn-block">转存定期</button>
+      </form>
+    </div>
+    <h3 class="sec-title">我的定期</h3>
+    ${deposits.length ? deposits.map((d) => `
+      <div class="card row-card">
+        <div class="avatar">🏦</div>
+        <div class="row-main">
+          <div class="row-title">${money(d.amount)} <span class="tag">${d.term_days} 天 · 年利率 ${(Number(d.rate) * 100).toFixed(1)}%</span></div>
+          <div class="row-sub">${fmtDate(d.mature_at)} 到期${isMatured(d) ? ' · 已到期可结算' : ''}</div>
+        </div>
+      </div>`).join('')
+      : '<div class="empty">还没有定期存款，把暂时用不到的钱转成定期吧</div>'}
+    <div class="btn-row"><button class="btn ok" onclick="settleTerm()">结算到期定期</button></div>
     <div class="card">
       <h3>🏦 取钱（需家长审核）</h3>
       <form onsubmit="takeMoney(event,'withdraw')" class="vform">
@@ -517,24 +671,6 @@ async function bindChild(e) {
 async function unbindChild(id) {
   if (!confirm('确定解除与该孩子的绑定吗？')) return;
   try { await api('DELETE', '/children/' + id); render(); } catch (err) { alert(err.message); }
-}
-function setRateModal(childId, current) {
-  openModal(`
-    <h3>设置年利率</h3>
-    <div class="field"><input id="rate-input" type="number" step="0.005" min="0" max="1" value="${current}">
-    <p class="hint">小数表示，如 0.02 = 年利率 2%</p></div>
-    <div class="btn-row">
-      <button class="btn" onclick="closeModal()">取消</button>
-      <button class="btn ok" onclick="submitRate(${childId})">保存</button>
-    </div>`);
-}
-async function submitRate(childId) {
-  try {
-    const r = await api('PATCH', '/children/' + childId + '/rate', {
-      interest_rate: parseFloat(document.getElementById('rate-input').value),
-    });
-    closeModal(); alert(r.msg); render();
-  } catch (err) { alert(err.message); }
 }
 async function settleInterest(childId) {
   try {

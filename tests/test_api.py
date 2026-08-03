@@ -139,6 +139,69 @@ class SavingsApiTest(unittest.TestCase):
         self.assertIn('interest', types)
 
 
+    def test_tier_interest(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 设置阶梯：≥0 → 50%，≥10 → 100%（余额 20 → 10*50%/365 + 10*100%/365 ≈ 0.0411）
+        r = c.put('/api/children/%d/tiers' % child1['id'], headers=self.header(p),
+                  json={'tiers': [{'min_amount': 0, 'rate': 0.5},
+                                  {'min_amount': 10, 'rate': 1.0}]})
+        self.assertTrue(r.get_json()['ok'])
+        tiers = c.get('/api/children/%d/tiers' % child1['id'],
+                      headers=self.header(p)).get_json()['tiers']
+        self.assertEqual(len(tiers), 2)
+
+        # 综合年利率 ≈ 0.0411*365/20 = 0.75
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['effective_rate'], 0.75, places=3)
+
+        # 结息后余额 = 20.04
+        r = c.post('/api/interest/settle', headers=self.header(p), json={})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20.04, places=2)
+
+    def test_term_deposit(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 配置定期利率（时间阶梯）：≥1天 50%，≥30天 100%
+        r = c.put('/api/children/%d/term-tiers' % child1['id'], headers=self.header(p),
+                  json={'tiers': [{'min_days': 1, 'rate': 0.5}, {'min_days': 30, 'rate': 1.0}]})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 活期 20 → 转存 10 元定期 30 天（利率应取 100%）
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 30})
+        self.assertTrue(r.get_json()['ok'])
+        self.assertAlmostEqual(r.get_json()['rate'], 1.0, places=3)
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 10.0, places=2)      # 活期减少
+        self.assertAlmostEqual(acc['term_balance'], 10.0, places=2)  # 定期增加
+
+        # 把到期时间改到过去，模拟到期后结算
+        import sqlite3
+        db = sqlite3.connect(appmod.DB_PATH)
+        db.execute("UPDATE term_deposits SET mature_at='2000-01-01 00:00:00' WHERE status='active'")
+        db.commit()
+        db.close()
+
+        r = c.post('/api/term-deposits/settle', headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        self.assertEqual(r.get_json()['count'], 1)
+
+        # 本金+利息回活期：10 + 10*100%*30/365 ≈ 20.82
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20.82, places=2)
+        self.assertAlmostEqual(acc['term_balance'], 0.0, places=2)
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

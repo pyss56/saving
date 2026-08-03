@@ -16,7 +16,10 @@
 - **储蓄目标**：孩子建立目标（金额/截止日），查看进度条；存钱可关联目标，达标自动标记「已达成」
 - **资金流水**：所有存钱 / 取钱 / 消费 / 奖励 / 惩罚 / 利息都形成流水记录
 - **取钱/消费需家长审核**：孩子提交申请，家长通过才扣款
-- **利息**：每个孩子可配置年利率，**每日自动结算利息**（也可手动结算）
+- **利息**：**活期 + 定期**双轨利息
+  - 活期：按余额**阶梯年利率**分段计息（如 ≥0→1%、≥100→2%），**每日自动结算**
+  - 定期：可把活期转存**定期**（锁定 N 天），**存期越长利率越高**（时间阶梯），到期自动还本付息
+  - 均可手动结算/提前手动结算到期定期
 - **PWA**：离线可用、可安装到手机桌面，类 APP 体验
 - 柔和卡通 UI，手机浏览器自适应
 
@@ -109,8 +112,13 @@ python -m unittest discover -s tests -p 'test_*.py' -v
 | POST | `/auth/change-password` | 修改密码（需当前密码，改后其它设备 token 失效） |
 | GET | `/me` / `/me/account` | 当前用户 / 儿童账户 |
 | GET/POST | `/children` `/children/bind` | 家长查看/绑定孩子 |
-| PATCH/DELETE | `/children/<id>/rate` `/children/<id>` | 设利率 / 解绑 |
+| PATCH/DELETE | `/children/<id>/rate` `/children/<id>` | 设单利率 / 解绑 |
+| GET/PUT | `/children/<id>/tiers` | 查看/保存活期阶梯利率 |
+| GET/PUT | `/children/<id>/term-tiers` | 查看/保存定期（时间）阶梯利率 |
 | POST | `/children/<id>/interest` `/interest/settle` | 结息 / 全局结息 |
+| POST | `/term-deposits` | 转存定期（活期转定期） |
+| GET | `/term-deposits` | 定期存款列表 |
+| POST | `/term-deposits/settle` | 结算到期定期 |
 | GET/POST | `/templates` | 奖惩模板列表/新增 |
 | PATCH/DELETE | `/templates/<id>` | 修改/删除模板 |
 | POST | `/children/<id>/punish` | 惩罚扣款（模板或自定义） |

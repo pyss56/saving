@@ -30,6 +30,39 @@ CREATE TABLE IF NOT EXISTS accounts (
   last_interest_at TEXT
 );
 
+-- 阶梯利率：按余额区间分段计息
+-- 区间 [min_amount, 下一档 min_amount) 使用本档 rate；最高档向上无限
+CREATE TABLE IF NOT EXISTS interest_tiers (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  min_amount REAL    NOT NULL DEFAULT 0,
+  rate       REAL    NOT NULL DEFAULT 0.02,
+  UNIQUE (child_id, min_amount)
+);
+
+-- 定期利率阶梯（时间阶梯）：按存期天数分段（存期越长利率越高）
+-- 存期为 N 天时，适用 min_days <= N 的最高档 rate
+CREATE TABLE IF NOT EXISTS term_tiers (
+  id       INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  min_days INTEGER NOT NULL DEFAULT 0,
+  rate     REAL    NOT NULL DEFAULT 0.02,
+  UNIQUE (child_id, min_days)
+);
+
+-- 定期存款：活期转定期锁定，到期返还本金并结算定期利息
+CREATE TABLE IF NOT EXISTS term_deposits (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  child_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+  amount     REAL    NOT NULL,
+  rate       REAL    NOT NULL,
+  term_days  INTEGER NOT NULL,
+  start_at   TEXT    NOT NULL,
+  mature_at  TEXT    NOT NULL,
+  status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','matured'))
+);
+
 -- 奖惩模板：每个项目每次的价格
 CREATE TABLE IF NOT EXISTS templates (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
