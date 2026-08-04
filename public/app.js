@@ -243,7 +243,7 @@ async function parentChildren() {
         <button class="btn primary">绑定</button>
       </form>
       <div class="btn-row" style="margin-top:8px">
-        <button class="btn" onclick="createChildModal()">➕ 创建孩子账号</button>
+        <button class="btn" onclick="createChildModal()">➕ 创建账号</button>
       </div>
     </div>
     ${c.children.map((ch) => `
@@ -263,7 +263,7 @@ async function parentChildren() {
           <button class="btn ghost" onclick="unbindChild(${ch.id})">解绑</button>
         </div>
       </div>`).join('')}
-    <p class="hint">可用「创建孩子账号」直接建号并自动绑定；若孩子已自行注册，也可输入其用户名绑定。</p>`;
+    <p class="hint">可用「创建账号」为孩子建号并自动绑定，或创建新的家长账号；若孩子已自行注册，也可输入其用户名绑定。</p>`;
 }
 
 function rateLabel(ch) {
@@ -675,9 +675,10 @@ async function bindChild(e) {
 }
 function createChildModal() {
   openModal(`
-    <h3>➕ 创建孩子账号</h3>
-    <p class="hint">家长直接创建孩子账号并自动绑定，无需孩子自行注册。</p>
+    <h3>➕ 创建账号</h3>
+    <p class="hint">家长可为孩子创建账号（自动绑定），或为家人创建家长账号。</p>
     <form onsubmit="createChild(event)" class="vform">
+      <div class="field"><select id="cc-role"><option value="child">孩子（自动绑定）</option><option value="parent">家长</option></select></div>
       <div class="field"><input id="cc-username" placeholder="用户名（至少 3 个字符）" autocomplete="off" required></div>
       <div class="field"><input id="cc-password" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password" required></div>
       <div class="field"><input id="cc-name" placeholder="昵称" autocomplete="off" required></div>
@@ -691,6 +692,7 @@ async function createChild(e) {
   e.preventDefault();
   try {
     const r = await api('POST', '/children', {
+      role: document.getElementById('cc-role').value,
       username: document.getElementById('cc-username').value.trim(),
       password: document.getElementById('cc-password').value,
       name: document.getElementById('cc-name').value.trim(),

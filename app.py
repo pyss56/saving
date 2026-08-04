@@ -517,11 +517,14 @@ def settle_term_deposits():
 @app.route('/api/children', methods=['POST'])
 @require_parent
 def create_child():
-    """家长创建孩子账号并自动绑定（注册开关关闭时仍可使用）。"""
+    """家长创建账号（默认孩子，可传 role=parent 创建家长账号；注册开关关闭时仍可用）。"""
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
     name = (data.get('name') or '').strip()
+    role = data.get('role') or 'child'
+    if role not in ('parent', 'child'):
+        return error('角色不合法')
     if not username or len(username) < 3:
         return error('用户名至少 3 个字符')
     if len(password) < 6:
@@ -533,14 +536,15 @@ def create_child():
         return error('用户名已存在')
     cur = db.execute(
         'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
-        (username, generate_password_hash(password), name, 'child', now_str()),
+        (username, generate_password_hash(password), name, role, now_str()),
     )
     uid = cur.lastrowid
-    db.execute('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,0,0.02)', (uid,))
-    db.execute('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)', (g.user['id'], uid))
+    if role == 'child':
+        db.execute('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,0,0.02)', (uid,))
+        db.execute('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)', (g.user['id'], uid))
     db.commit()
-    return ok(msg='孩子账号已创建并绑定',
-              user={'id': uid, 'username': username, 'name': name, 'role': 'child'})
+    return ok(msg='孩子账号已创建并绑定' if role == 'child' else '家长账号已创建',
+              user={'id': uid, 'username': username, 'name': name, 'role': role})
 
 
 @app.route('/api/children')
