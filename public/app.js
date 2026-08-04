@@ -169,8 +169,8 @@ function renderAuth() {
   <div class="auth-wrap">
     <div class="auth-card">
       <div class="auth-logo">🐷</div>
-      <h1>儿童储蓄银行</h1>
-      <p class="auth-sub">亲子储蓄小天地</p>
+      <h1>小猪银行</h1>
+      <p class="auth-sub">亲子存钱 · 快乐成长</p>
       <form onsubmit="authSubmit(event)" class="vform">
         <div class="field"><input id="f-username" placeholder="用户名" autocomplete="username" required></div>
         <div class="field"><input id="f-password" type="password" placeholder="密码（至少 6 位）" autocomplete="current-password" required></div>

@@ -1,7 +1,7 @@
 {
-  "name": "儿童储蓄银行",
-  "short_name": "储蓄银行",
-  "description": "亲子储蓄小天地",
+  "name": "小猪银行",
+  "short_name": "小猪银行",
+  "description": "亲子存钱 · 快乐成长",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
