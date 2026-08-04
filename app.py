@@ -21,6 +21,9 @@ DB_PATH = os.environ.get('DB_PATH', os.path.join(DATA_DIR, 'savings.db'))
 PUBLIC_DIR = os.path.join(BASE_DIR, 'public')
 TOKEN_TTL = 60 * 60 * 24 * 30  # token 有效期 30 天
 
+# 注册开关：未配置默认不允许注册；设为 1/true/yes/on 时允许
+ALLOW_REGISTER = os.environ.get('ALLOW_REGISTER', '').strip().lower() in ('1', 'true', 'yes', 'on')
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # 显式指定 instance_path，避免 Python 3.14 移除 pkgutil.get_loader 导致的自动探测崩溃
@@ -250,11 +253,13 @@ require_child = require_role('child')
 # ---------------- 认证接口 ----------------
 @app.route('/api/health')
 def health():
-    return ok(msg='ok')
+    return ok(msg='ok', allow_register=ALLOW_REGISTER)
 
 
 @app.route('/api/auth/register', methods=['POST'])
 def register():
+    if not ALLOW_REGISTER:
+        return error('注册功能已关闭', 403)
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''

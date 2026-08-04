@@ -6,6 +6,7 @@ const API = '/api';
 let token = localStorage.getItem('token') || '';
 let user = JSON.parse(localStorage.getItem('user') || 'null');
 let tab = 'overview'; // 当前页签
+let allowRegister = false; // 是否允许注册（由后端 /api/health 下发）
 
 const $app = document.getElementById('app');
 const $modal = document.getElementById('modal-root');
@@ -161,7 +162,7 @@ function renderAuth() {
         </div>
         <button class="btn primary btn-block" type="submit" id="f-submit">登 录</button>
       </form>
-      <button class="link" onclick="toggleAuthMode()" id="f-toggle">没有账号？立即注册</button>
+      ${allowRegister ? '<button class="link" onclick="toggleAuthMode()" id="f-toggle">没有账号？立即注册</button>' : ''}
     </div>
   </div>`;
 }
@@ -873,4 +874,11 @@ if ('serviceWorker' in navigator) {
   }
 })();
 
-render();
+/* 启动：先拉取后端配置（注册开关等），再渲染页面 */
+(async function boot() {
+  try {
+    const h = await api('GET', '/health');
+    allowRegister = !!h.allow_register;
+  } catch (e) { /* 拉取失败保持默认：不允许注册 */ }
+  render();
+})();

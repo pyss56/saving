@@ -7,6 +7,8 @@ services:
     environment:
       - PORT=8000
       - DATA_DIR=/app/data
+      # 注册开关：设为 1 才允许用户自行注册（未配置默认关闭）
+      # - ALLOW_REGISTER=1
     volumes:
       # 数据挂载到宿主机目录：./data = docker-compose.yml 所在目录下的 data/，方便直接查看和备份
       - ./data:/app/data

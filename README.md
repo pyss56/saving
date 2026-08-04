@@ -89,6 +89,7 @@ python app.py
 | `INIT_USERNAME` | `parent` | 初始家长用户名 |
 | `INIT_PASSWORD` | `123456` | 初始家长密码（首次登录后请修改） |
 | `SEED_DEMO` | 空 | 设为 `1` 时写入 parent1/child1/child2 演示数据（测试用） |
+| `ALLOW_REGISTER` | 空 | 设为 `1` 时允许家长/儿童自行注册（未配置默认关闭） |
 
 ---
 
