@@ -242,6 +242,9 @@ async function parentChildren() {
         <input id="bind-username" placeholder="输入孩子的用户名" required>
         <button class="btn primary">绑定</button>
       </form>
+      <div class="btn-row" style="margin-top:8px">
+        <button class="btn" onclick="createChildModal()">➕ 创建孩子账号</button>
+      </div>
     </div>
     ${c.children.map((ch) => `
       <div class="card">
@@ -260,7 +263,7 @@ async function parentChildren() {
           <button class="btn ghost" onclick="unbindChild(${ch.id})">解绑</button>
         </div>
       </div>`).join('')}
-    <p class="hint">孩子先注册账号，再用其用户名在此绑定。</p>`;
+    <p class="hint">可用「创建孩子账号」直接建号并自动绑定；若孩子已自行注册，也可输入其用户名绑定。</p>`;
 }
 
 function rateLabel(ch) {
@@ -668,6 +671,31 @@ async function bindChild(e) {
   try {
     const r = await api('POST', '/children/bind', { username: document.getElementById('bind-username').value.trim() });
     alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
+function createChildModal() {
+  openModal(`
+    <h3>➕ 创建孩子账号</h3>
+    <p class="hint">家长直接创建孩子账号并自动绑定，无需孩子自行注册。</p>
+    <form onsubmit="createChild(event)" class="vform">
+      <div class="field"><input id="cc-username" placeholder="用户名（至少 3 个字符）" autocomplete="off" required></div>
+      <div class="field"><input id="cc-password" type="password" placeholder="密码（至少 6 位）" autocomplete="new-password" required></div>
+      <div class="field"><input id="cc-name" placeholder="昵称" autocomplete="off" required></div>
+      <div class="btn-row">
+        <button class="btn ghost" type="button" onclick="closeModal()">取消</button>
+        <button class="btn primary" type="submit">创建</button>
+      </div>
+    </form>`);
+}
+async function createChild(e) {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/children', {
+      username: document.getElementById('cc-username').value.trim(),
+      password: document.getElementById('cc-password').value,
+      name: document.getElementById('cc-name').value.trim(),
+    });
+    closeModal(); alert(r.msg); render();
   } catch (err) { alert(err.message); }
 }
 async function unbindChild(id) {

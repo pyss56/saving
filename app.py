@@ -514,6 +514,35 @@ def settle_term_deposits():
 
 
 # ---------------- 家长-孩子绑定 ----------------
+@app.route('/api/children', methods=['POST'])
+@require_parent
+def create_child():
+    """家长创建孩子账号并自动绑定（注册开关关闭时仍可使用）。"""
+    data = request.get_json(silent=True) or {}
+    username = (data.get('username') or '').strip()
+    password = data.get('password') or ''
+    name = (data.get('name') or '').strip()
+    if not username or len(username) < 3:
+        return error('用户名至少 3 个字符')
+    if len(password) < 6:
+        return error('密码至少 6 位')
+    if not name:
+        return error('请填写昵称')
+    db = get_db()
+    if db.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+        return error('用户名已存在')
+    cur = db.execute(
+        'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
+        (username, generate_password_hash(password), name, 'child', now_str()),
+    )
+    uid = cur.lastrowid
+    db.execute('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,0,0.02)', (uid,))
+    db.execute('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)', (g.user['id'], uid))
+    db.commit()
+    return ok(msg='孩子账号已创建并绑定',
+              user={'id': uid, 'username': username, 'name': name, 'role': 'child'})
+
+
 @app.route('/api/children')
 @require_parent
 def list_children():

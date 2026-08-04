@@ -7,7 +7,11 @@ services:
     environment:
       - PORT=8000
       - DATA_DIR=/app/data
-      # 注册开关：设为 1 才允许用户自行注册（未配置默认关闭）
+      # ---- 注册开关（ALLOW_REGISTER）----
+      # 控制是否允许家长/儿童在登录页自行注册账号：
+      #   - 未设置 / 0 / false：关闭注册（默认），登录页不显示「立即注册」，/api/auth/register 返回 403
+      #   - 1 / true / yes / on：开启注册
+      # 需要开放注册时，取消下面这行注释即可：
       # - ALLOW_REGISTER=1
     volumes:
       # 数据挂载到宿主机目录：./data = docker-compose.yml 所在目录下的 data/，方便直接查看和备份
