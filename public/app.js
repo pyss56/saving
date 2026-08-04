@@ -19,6 +19,23 @@ const esc = (s) =>
 const money = (n) => '¥' + Number(n || 0).toFixed(2);
 const fmtDate = (s) => (s ? String(s).slice(5, 16) : '');
 
+/* ---------- 轻提示（替代原生 alert 弹窗） ---------- */
+let __toastTimer = null;
+function toast(msg) {
+  let el = document.getElementById('toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'toast';
+    document.body.appendChild(el);
+  }
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(__toastTimer);
+  __toastTimer = setTimeout(() => el.classList.remove('show'), 2200);
+}
+/* 覆盖原生 alert：全部改为底部消息条，不再弹窗 */
+function alert(msg) { toast(msg); }
+
 const TYPE_LABEL = {
   task_reward: '任务奖励', punish: '惩罚扣款', save: '存钱',
   withdraw: '取钱', consume: '消费', interest: '活期利息',
@@ -33,6 +50,7 @@ const TYPE_ICON = {
 const TASK_STATUS = {
   pending: '待家长审批', active: '待完成', completed: '待家长确认', paid: '已发放', rejected: '已驳回',
 };
+const TPL_ICONS = ['⭐', '🏆', '💰', '🧹', '🍽️', '📚', '🎨', '🏅', '🍪', '🧸', '🎮', '⚽', '📝', '✏️', '🌱', '🚿', '🦷', '🥗', '🪥', '🚫', '⏰', '😴', '📵', '🤬'];
 
 const PARENT_TABS = [
   { id: 'overview', name: '总览', icon: '🏠' },
@@ -397,10 +415,14 @@ async function parentTemplates() {
       <h3>📋 新增奖惩项目</h3>
       <form onsubmit="addTemplate(event)" class="vform">
         <div class="field"><input id="t-name" placeholder="项目名称，如：扫地" required></div>
-        <div class="field"><div class="field-row">
-          <select id="t-type"><option value="reward">奖励</option><option value="punish">惩罚</option></select>
-          <input id="t-icon" placeholder="图标(emoji)" maxlength="4">
-        </div></div>
+        <div class="field"><select id="t-type"><option value="reward">奖励</option><option value="punish">惩罚</option></select></div>
+        <div class="field">
+          <label class="tpl-icon-label">图标（点击选择）：</label>
+          <div class="emoji-picker" id="t-icon-picker">
+            ${TPL_ICONS.map((e) => `<button type="button" class="emoji-opt" data-e="${e}" onclick="pickTplIcon('${e}')">${e}</button>`).join('')}
+          </div>
+          <input id="t-icon" placeholder="或输入自定义 emoji" maxlength="4" autocomplete="off" oninput="pickTplIconCustom(this.value)">
+        </div>
         <div class="field"><div class="field-row">
           <input id="t-amount" type="number" step="0.5" min="0.5" placeholder="每次价格(元)" required>
           <button class="btn primary">保存</button>
@@ -734,6 +756,17 @@ async function submitPunish(childId) {
     const r = await api('POST', '/children/' + childId + '/punish', body);
     closeModal(); alert(r.msg); render();
   } catch (err) { alert(err.message); }
+}
+function pickTplIcon(e) {
+  const ip = document.getElementById('t-icon');
+  if (ip) ip.value = e;
+  const el = document.getElementById('t-icon-picker');
+  if (el) el.querySelectorAll('.emoji-opt').forEach((b) => b.classList.toggle('on', b.dataset.e === e));
+}
+function pickTplIconCustom(v) {
+  const val = (v || '').trim();
+  const el = document.getElementById('t-icon-picker');
+  if (el) el.querySelectorAll('.emoji-opt').forEach((b) => b.classList.toggle('on', b.dataset.e === val));
 }
 async function addTemplate(e) {
   e.preventDefault();
