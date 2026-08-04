@@ -196,8 +196,20 @@ def create_pending_debit(db, child_id, amount, type_, description=''):
     return cur.lastrowid
 
 
+def create_pending_credit(db, child_id, amount, type_, description='', goal_id=None):
+    """存钱/入账：创建待家长确认的入账单，确认后才入账。"""
+    acc = get_account(db, child_id)
+    cur = db.execute(
+        "INSERT INTO transactions (child_id, account_id, goal_id, type, amount, balance_after, "
+        "description, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (child_id, acc['id'], goal_id, type_, amount, None, description, 'pending', now_str()),
+    )
+    db.commit()
+    return cur.lastrowid
+
+
 def review_pending_tx(db, tx_id, parent_id, action):
-    """家长审核待处理的取款/消费单。"""
+    """家长审核待处理的存款/取款/消费单。"""
     tx = db.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
     if not tx or tx['status'] != 'pending':
         raise ValueError('该单据不可审核')
@@ -205,10 +217,21 @@ def review_pending_tx(db, tx_id, parent_id, action):
         raise ValueError('无权审核该单据')
     if action == 'approve':
         acc = get_account(db, tx['child_id'])
-        new_balance = round(float(acc['balance']) + float(tx['amount']), 2)  # amount 为负数
+        new_balance = round(float(acc['balance']) + float(tx['amount']), 2)  # amount 正负皆可
         db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
         db.execute("UPDATE transactions SET status='approved', balance_after=?, reviewed_by=?, "
                    "reviewed_at=? WHERE id=?", (new_balance, parent_id, now_str(), tx_id))
+        # 存款入账后同步目标进度
+        if float(tx['amount']) > 0 and tx['goal_id']:
+            goal = db.execute('SELECT * FROM goals WHERE id=? AND child_id=?',
+                              (tx['goal_id'], tx['child_id'])).fetchone()
+            if goal and goal['status'] == 'active':
+                new_saved = round(float(goal['saved_amount']) + float(tx['amount']), 2)
+                if new_saved >= float(goal['target_amount']):
+                    db.execute('UPDATE goals SET saved_amount=?, status=?, achieved_at=? WHERE id=?',
+                               (new_saved, 'achieved', now_str(), tx['goal_id']))
+                else:
+                    db.execute('UPDATE goals SET saved_amount=? WHERE id=?', (new_saved, tx['goal_id']))
     else:
         db.execute("UPDATE transactions SET status='rejected', reviewed_by=?, reviewed_at=? WHERE id=?",
                    (parent_id, now_str(), tx_id))
@@ -1114,9 +1137,9 @@ def create_transaction():
     try:
         if ttype == 'save':
             goal_id = data.get('goal_id')
-            credit(db, g.user['id'], amount, 'save',
-                   description=data.get('description') or '存入零花钱', goal_id=goal_id)
-            return ok(msg='存款成功', balance=round(float(acc['balance']) + amount, 2))
+            create_pending_credit(db, g.user['id'], amount, 'save',
+                                  description=data.get('description') or '存入零花钱', goal_id=goal_id)
+            return ok(msg='存款申请已提交，等待家长确认入账', balance=float(acc['balance']))
         if ttype in ('withdraw', 'consume'):
             if float(acc['balance']) < amount:
                 return error('余额不足')

@@ -487,14 +487,14 @@ async function parentReviews() {
           <div class="row-title">${esc(t.child_name || '')} · ${TYPE_LABEL[t.type] || t.type} <span class="tag pending">待审核</span></div>
           <div class="row-sub">${esc(t.description || '')} · ${fmtDate(t.created_at)}</div>
         </div>
-        <div class="row-amount minus">-${money(Math.abs(t.amount))}</div>
+        <div class="row-amount ${Number(t.amount) >= 0 ? 'plus' : 'minus'}">${Number(t.amount) >= 0 ? '+' : '-'}${money(Math.abs(t.amount))}</div>
       </div>
       <div class="btn-row">
-        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">通过</button>
+        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">${Number(t.amount) >= 0 ? '确认入账' : '通过'}</button>
         <button class="btn" onclick="reviewTx(${t.id},'reject')">驳回</button>
       </div>
     </div>`).join('');
-  return `<h3 class="sec-title">待审核的取钱 / 消费</h3>${list || '<div class="empty">暂无待审核项目 🎉</div>'}`;
+  return `<h3 class="sec-title">待审核项目（存钱 / 取钱 / 消费）</h3>${list || '<div class="empty">暂无待审核项目 🎉</div>'}`;
 }
 
 /* ================= 儿童端 ================= */

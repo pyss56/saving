@@ -139,10 +139,24 @@ class SavingsApiTest(unittest.TestCase):
         self.assertTrue(r.get_json()['ok'])
         goal_id = r.get_json()['id']
 
-        # 存钱并关联目标
+        # 存钱并关联目标 → 待家长确认入账
         r = c.post('/api/transactions', headers=self.header(ch),
                    json={'type': 'save', 'amount': 10, 'goal_id': goal_id})
         self.assertTrue(r.get_json()['ok'])
+        # 未确认前余额与目标进度不变
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20, places=2)  # 初始 20
+        goal = c.get('/api/goals', headers=self.header(ch)).get_json()['goals'][0]
+        self.assertAlmostEqual(goal['saved_amount'], 0, places=2)
+
+        # 家长确认入账 → 余额与目标进度更新
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        save_tx = next(t for t in reviews if t['type'] == 'save')
+        r = c.patch('/api/transactions/%d/review' % save_tx['id'], headers=self.header(p),
+                    json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 30, places=2)  # 20 + 10
         goal = c.get('/api/goals', headers=self.header(ch)).get_json()['goals'][0]
         self.assertAlmostEqual(goal['saved_amount'], 10, places=2)
 
