@@ -913,8 +913,6 @@ def list_tasks():
 def create_task():
     data = request.get_json(silent=True) or {}
     title = (data.get('title') or '').strip()
-    if not title:
-        return error('请填写任务名称')
     db = get_db()
     reward = 0.0
     template_id = data.get('template_id')
@@ -924,8 +922,11 @@ def create_task():
         if not tpl:
             return error('奖励模板不存在')
         reward = round(float(tpl['amount']), 2)
+        # 名称/金额留空时使用模板内容
         if not title:
-            title = tpl['name']
+            title = (tpl['name'] or '').strip()
+    if not title:
+        return error('请填写任务名称')
     try:
         reward = round(float(data.get('reward_amount') or reward or 0), 2)
     except (TypeError, ValueError):

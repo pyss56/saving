@@ -467,7 +467,7 @@ async function parentTasks() {
       <form onsubmit="createTask(event)" class="vform">
         <div class="field"><select id="tk-child" required><option value="">选择孩子</option>${childOpts}</select></div>
         <div class="field"><select id="tk-tpl">${tplOpts}</select></div>
-        <div class="field"><input id="tk-title" placeholder="任务名称，如：打扫房间" required></div>
+        <div class="field"><input id="tk-title" placeholder="任务名称（选了模板可留空，用模板名）"></div>
         <div class="field"><input id="tk-reward" type="number" step="0.5" min="0" placeholder="奖励金额(元，留空用模板价)"></div>
         <div class="field"><input id="tk-desc" placeholder="说明(可选)"></div>
         <div class="field"><label><input id="tk-completed" type="checkbox"> 已完成（孩子已经做完，直接登记）</label></div>
