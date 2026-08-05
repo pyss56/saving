@@ -428,6 +428,66 @@ class SavingsApiTest(unittest.TestCase):
                    json={'type': 'withdraw', 'amount': 10})
         self.assertTrue(r.get_json()['ok'])
 
+    def test_term_early_settle(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 配置定期利率：≥1天 50%，≥30天 100%
+        r = c.put('/api/children/%d/term-tiers' % child1['id'], headers=self.header(p),
+                  json={'tiers': [{'min_days': 1, 'rate': 0.5}, {'min_days': 30, 'rate': 1.0}]})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 活期 20 → 转存 10 元定期 30 天
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 30})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 把开立时间改到 10 天前，模拟已存 10 天（term_portion = 10/30）
+        import sqlite3
+        import datetime
+        db = sqlite3.connect(appmod.DB_PATH)
+        start = (datetime.datetime.now() - datetime.timedelta(days=10)).strftime('%Y-%m-%d %H:%M:%S')
+        db.execute("UPDATE term_deposits SET start_at=? WHERE status='active'", (start,))
+        db.commit()
+        db.close()
+
+        # 提前结清
+        dep = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits'][0]
+        r = c.post('/api/term-deposits/%d/settle' % dep['id'], headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        self.assertTrue(r.get_json()['early'])
+        interest = r.get_json()['interest']
+        self.assertGreater(interest, 0)
+
+        # 本金+利息回活期：活期 10 + 10 + 利息 = 20 + 利息；定期归零
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], round(20 + interest, 2), places=2)
+        self.assertAlmostEqual(acc['term_balance'], 0.0, places=2)
+
+        # 存单标记提前结清，不能重复结清
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        self.assertEqual(deps[0]['status'], 'matured')
+        self.assertIsNotNone(deps[0]['settled_at'])
+        r = c.post('/api/term-deposits/%d/settle' % dep['id'], headers=self.header(ch), json={})
+        self.assertEqual(r.status_code, 400)
+
+        # 流水包含提前结清类型
+        txs = c.get('/api/transactions', headers=self.header(ch)).get_json()['transactions']
+        types = {t['type'] for t in txs}
+        self.assertIn('term_early_out', types)
+        self.assertIn('term_early_interest', types)
+
+        # 家长也可为孩子结清（新建一笔再提前结清）
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 5, 'term_days': 30})
+        self.assertTrue(r.get_json()['ok'])
+        dep2 = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits'][0]
+        r = c.post('/api/term-deposits/%d/settle' % dep2['id'], headers=self.header(p), json={})
+        self.assertTrue(r.get_json()['ok'])
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

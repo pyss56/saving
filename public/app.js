@@ -40,12 +40,14 @@ const TYPE_LABEL = {
   task_reward: '任务奖励', punish: '惩罚扣款', save: '存钱',
   withdraw: '取钱', consume: '消费', interest: '活期利息',
   term_in: '转存定期', term_out: '定期到期', term_interest: '定期利息',
+  term_early_out: '定期提前结清', term_early_interest: '提前结清利息',
   parent_deposit: '家长存入',
 };
 const TYPE_ICON = {
   task_reward: '🎖️', punish: '🚫', save: '💰', withdraw: '🏦',
   consume: '🛒', interest: '✨', term_in: '🏦', term_out: '💵',
-  term_interest: '⭐', parent_deposit: '👛',
+  term_interest: '⭐', term_early_out: '🏦', term_early_interest: '💡',
+  parent_deposit: '👛',
 };
 const TASK_STATUS = {
   pending: '待家长审批', active: '待完成', completed: '待家长确认', paid: '已发放', rejected: '已驳回',
@@ -347,15 +349,9 @@ async function parentChildAccount(childId) {
       <div class="progress"><div class="progress-bar" style="width:${goalPct(g)}%"></div></div>
     </div>`).join('') || '<div class="empty">还没有储蓄目标</div>';
 
-  const activeDeposits = (acc.term_deposits || []).filter((d) => d.status === 'active');
-  const depositList = activeDeposits.map((d) => `
-    <div class="card row-card">
-      <div class="avatar">🏦</div>
-      <div class="row-main">
-        <div class="row-title">${money(d.amount)} <span class="tag">${d.term_days} 天 · 年利率 ${(Number(d.rate) * 100).toFixed(1)}%</span></div>
-        <div class="row-sub">${fmtDate(d.mature_at)} 到期${isMatured(d) ? ' · 已到期可结算' : ''}</div>
-      </div>
-    </div>`).join('') || '<div class="empty">没有进行中的定期存款</div>';
+  const deposits = acc.term_deposits || [];
+  const activeDeposits = deposits.filter((d) => d.status === 'active');
+  const depositList = deposits.length ? deposits.map(depositCard).join('') : '<div class="empty">没有定期存单</div>';
 
   const txList = (txs.length ? txs.slice(0, 30).map(txItem).join('') : '<div class="empty">暂无流水记录</div>');
 
@@ -529,6 +525,13 @@ async function settleTerm() {
   try { const r = await api('POST', '/term-deposits/settle'); alert(r.msg); render(); }
   catch (err) { alert(err.message); }
 }
+async function settleTermDeposit(id) {
+  if (!confirm('确定结算这笔存单吗？未到期提前结清时，未满足存期部分按活期利率折算利息。')) return;
+  try {
+    const r = await api('POST', '/term-deposits/' + id + '/settle');
+    alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
 
 async function parentTemplates() {
   const t = await api('GET', '/templates');
@@ -700,6 +703,37 @@ async function childOverview() {
 }
 
 const isMatured = (d) => new Date(String(d.mature_at).replace(' ', 'T')) <= new Date();
+
+/* 定期存单卡片：独立展示存单信息（开立/到期时间、金额、期限、利率、状态），可结清 */
+const depositCard = (d) => {
+  const active = d.status === 'active';
+  const matured = isMatured(d);
+  let statusTag = '';
+  if (!active) {
+    statusTag = d.settled_at
+      ? '<span class="tag">已提前结清</span>'
+      : '<span class="tag">已到期</span>';
+  } else if (matured) {
+    statusTag = '<span class="tag pending">已到期可结算</span>';
+  }
+  const btn = active
+    ? `<div class="btn-row" style="margin-top:8px">
+        <button class="btn ok" onclick="settleTermDeposit(${d.id})">${matured ? '结算到期' : '提前结清'}</button>
+      </div>` : '';
+  return `
+    <div class="card">
+      <div class="row-card">
+        <div class="avatar">🏦</div>
+        <div class="row-main">
+          <div class="row-title">存单 #${d.id} ${money(d.amount)} ${statusTag}
+            <span class="tag">${d.term_days} 天 · 年利率 ${(Number(d.rate) * 100).toFixed(1)}%</span></div>
+          <div class="row-sub">📅 开立：${d.start_at}<br>⏰ 到期：${d.mature_at}</div>
+        </div>
+      </div>
+      ${btn}
+    </div>`;
+};
+
 function termDaysOptions(termTiers) {
   let days = termTiers && termTiers.length ? termTiers.map((t) => Number(t.min_days)) : [7, 30, 90, 365];
   days = [...new Set(days)].filter((d) => d > 0).sort((a, b) => a - b);
@@ -713,7 +747,7 @@ async function childMoney() {
   const goals = (await api('GET', '/goals')).goals.filter((g) => g.status === 'active');
   const goalOpts = '<option value="">不关联目标</option>' +
     goals.map((g) => `<option value="${g.id}">${esc(g.name)}</option>`).join('');
-  const deposits = (acc.term_deposits || []).filter((d) => d.status === 'active');
+  const deposits = acc.term_deposits || [];
   const recent = (await api('GET', '/transactions')).transactions.slice(0, 5);
   const dayOptions = termDaysOptions(acc.term_tiers);
   const pendingDepositLine = acc.pending_deposit > 0
@@ -735,7 +769,7 @@ async function childMoney() {
       </form>
     </div>
     <div class="card">
-      <h3>🏦 定期存款（锁定期内不能取，到期自动还本付息）</h3>
+      <h3>🏦 定期存款（可提前结清，未到期部分按活期利率折算）</h3>
       <form onsubmit="createTermDeposit(event)" class="vform">
         <div class="field"><div class="field-row">
           <input id="td-amount" type="number" step="0.5" min="0.5" placeholder="转存金额(元)" required>
@@ -744,17 +778,11 @@ async function childMoney() {
         <button class="btn primary btn-block">转存定期</button>
       </form>
     </div>
-    <h3 class="sec-title">我的定期</h3>
-    ${deposits.length ? deposits.map((d) => `
-      <div class="card row-card">
-        <div class="avatar">🏦</div>
-        <div class="row-main">
-          <div class="row-title">${money(d.amount)} <span class="tag">${d.term_days} 天 · 年利率 ${(Number(d.rate) * 100).toFixed(1)}%</span></div>
-          <div class="row-sub">${fmtDate(d.mature_at)} 到期${isMatured(d) ? ' · 已到期可结算' : ''}</div>
-        </div>
-      </div>`).join('')
-      : '<div class="empty">还没有定期存款，把暂时用不到的钱转成定期吧</div>'}
-    <div class="btn-row"><button class="btn ok" onclick="settleTerm()">结算到期定期</button></div>
+    <h3 class="sec-title">我的定期存单</h3>
+    ${deposits.length ? deposits.map(depositCard).join('')
+      : '<div class="empty">还没有定期存单，把暂时用不到的钱转成定期吧</div>'}
+    ${deposits.some((d) => d.status === 'active' && isMatured(d))
+      ? '<div class="btn-row"><button class="btn ok" onclick="settleTerm()">结算全部到期定期</button></div>' : ''}
     <div class="card">
       <h3>🏦 取钱（需家长审核）</h3>
       <form onsubmit="takeMoney(event,'withdraw')" class="vform">

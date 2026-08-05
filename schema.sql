@@ -50,7 +50,8 @@ CREATE TABLE IF NOT EXISTS term_tiers (
   UNIQUE (child_id, min_days)
 );
 
--- 定期存款：活期转定期锁定，到期返还本金并结算定期利息
+-- 定期存款：活期转定期锁定，到期返还本金并结算定期利息；也可提前结清（未到期部分按活期折算）
+-- status: active=存期中, matured=已结算(到期或提前结清)；settled_at 非空表示提前结清
 CREATE TABLE IF NOT EXISTS term_deposits (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   child_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -60,7 +61,8 @@ CREATE TABLE IF NOT EXISTS term_deposits (
   term_days  INTEGER NOT NULL,
   start_at   TEXT    NOT NULL,
   mature_at  TEXT    NOT NULL,
-  status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','matured'))
+  status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','matured')),
+  settled_at TEXT
 );
 
 -- 奖惩模板：每个项目每次的价格

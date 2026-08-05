@@ -70,9 +70,12 @@ def init_db():
 
 def migrate_db(db):
     """轻量迁移：为已存在的数据库补齐新增字段，保证旧库升级后可用。"""
-    cols = [r[1] for r in db.execute('PRAGMA table_info(transactions)').fetchall()]
-    if 'cancelled_at' not in cols:
-        db.execute('ALTER TABLE transactions ADD COLUMN cancelled_at TEXT')
+    def add_col(table, col, ddl):
+        cols = [r[1] for r in db.execute('PRAGMA table_info(%s)' % table).fetchall()]
+        if col not in cols:
+            db.execute('ALTER TABLE %s ADD COLUMN %s' % (table, ddl))
+    add_col('transactions', 'cancelled_at', 'cancelled_at TEXT')
+    add_col('term_deposits', 'settled_at', 'settled_at TEXT')
     db.commit()
 
 
@@ -642,6 +645,30 @@ def settle_term_deposits():
     return ok(msg='没有到期的定期存款', count=0)
 
 
+@app.route('/api/term-deposits/<int:deposit_id>/settle', methods=['POST'])
+@require_auth
+def settle_one_term_deposit(deposit_id):
+    """结算单笔定期存单：到期正常结算；未到期可提前结清（利息按定期/活期折算）。"""
+    db = get_db()
+    d = db.execute('SELECT * FROM term_deposits WHERE id=?', (deposit_id,)).fetchone()
+    if not d:
+        return error('存单不存在')
+    if g.user['role'] == 'child':
+        if d['child_id'] != g.user['id']:
+            return error('无权操作')
+    elif not is_child_of(g.user['id'], d['child_id']):
+        return error('无权操作')
+    if d['status'] != 'active':
+        return error('该存单已结算，不能重复结清')
+    interest, early = settle_single_deposit(db, d)
+    db.commit()
+    if early:
+        return ok(msg=f'已提前结清存单 #{deposit_id}，利息 {interest:.2f} 元（未到期部分按活期折算）',
+                  interest=round(interest, 2), early=True)
+    return ok(msg=f'已结算存单 #{deposit_id}，利息 {interest:.2f} 元',
+              interest=round(interest, 2), early=False)
+
+
 # ---------------- 家长-孩子绑定 ----------------
 @app.route('/api/children', methods=['POST'])
 @require_parent
@@ -839,6 +866,61 @@ def term_rate_for_days(db, child_id, days):
     return chosen
 
 
+def settle_single_deposit(db, d):
+    """结算单笔定期存单：返还本金+利息到活期，存单置为 matured。
+
+    - 到期（now >= mature_at）：全程按定期利率结算。
+    - 提前结清（未到期）：已满足存期部分按定期利率、未满足部分按活期利率折算——
+      持有比例 term_portion = 已存天数/存期，blended_rate = 定期利率*term_portion
+      + 活期利率*(1-term_portion)，利息 = 本金 * blended_rate * 已存天数/365。
+    返回 (利息, 是否提前结清)。
+    """
+    now = now_str()
+    amount = float(d['amount'])
+    term_days = int(d['term_days'])
+    rate = float(d['rate'])
+    acc = db.execute('SELECT * FROM accounts WHERE id=?', (d['account_id'],)).fetchone()
+    if now >= d['mature_at']:
+        interest = round(amount * rate * term_days / 365, 2)
+        early = False
+    else:
+        start = datetime.datetime.strptime(d['start_at'], '%Y-%m-%d %H:%M:%S')
+        elapsed_days = max(0.0, (datetime.datetime.now() - start).total_seconds() / 86400.0)
+        term_portion = min(1.0, elapsed_days / term_days)
+        demand_rate = float(acc['interest_rate']) if acc else 0.02
+        blended = rate * term_portion + demand_rate * (1 - term_portion)
+        interest = round(amount * blended * elapsed_days / 365, 2)
+        early = True
+    total = round(amount + interest, 2)
+    new_balance = round(float(acc['balance']) + total, 2)
+    db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
+    db.execute("UPDATE term_deposits SET status='matured', settled_at=? WHERE id=?",
+               (now if early else None, d['id']))
+    if early:
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_early_out', amount, new_balance,
+             '定期提前结清·本金返还', 'approved', now))
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_early_interest', interest, new_balance,
+             '提前结清利息（未到期部分按活期折算）', 'approved', now))
+    else:
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_out', amount, new_balance,
+             '定期到期·本金返还', 'approved', now))
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], 'term_interest', interest, new_balance,
+             '定期利息', 'approved', now))
+    return interest, early
+
+
 def mature_due_deposits(db, child_id=None):
     """结算到期的定期存款：返还本金 + 发放定期利息。
     返回 (到期笔数, 发放利息合计)。child_id 为 None 时结算所有孩子。
@@ -855,22 +937,7 @@ def mature_due_deposits(db, child_id=None):
     count = 0
     interest_sum = 0.0
     for d in deps:
-        interest = round(float(d['amount']) * float(d['rate']) * int(d['term_days']) / 365, 2)
-        total = round(float(d['amount']) + interest, 2)
-        acc = db.execute('SELECT * FROM accounts WHERE id=?', (d['account_id'],)).fetchone()
-        new_balance = round(float(acc['balance']) + total, 2)
-        db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
-        db.execute("UPDATE term_deposits SET status='matured' WHERE id=?", (d['id'],))
-        db.execute(
-            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
-            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (d['child_id'], d['account_id'], 'term_out', float(d['amount']), new_balance,
-             '定期到期·本金返还', 'approved', now))
-        db.execute(
-            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
-            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-            (d['child_id'], d['account_id'], 'term_interest', interest, new_balance,
-             '定期利息', 'approved', now))
+        interest, _early = settle_single_deposit(db, d)
         count += 1
         interest_sum += interest
     return count, interest_sum
