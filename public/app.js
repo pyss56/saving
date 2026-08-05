@@ -327,21 +327,15 @@ async function parentChildAccount(childId) {
   if (acc.pending_withdraw > 0) pendingTxt.push(`待审核冻结 ${money(acc.pending_withdraw)}`);
   const pendingLine = pendingTxt.length ? `<div class="hero-pending">⏳ ${pendingTxt.join(' · ')}</div>` : '';
 
-  const pendingList = pending.map((t) => `
-    <div class="card">
-      <div class="row-card">
-        <div class="avatar">${TYPE_ICON[t.type] || '💸'}</div>
-        <div class="row-main">
-          <div class="row-title">${TYPE_LABEL[t.type] || t.type} <span class="tag pending">待审核</span></div>
-          <div class="row-sub">${esc(t.description || '')} · ${fmtDate(t.created_at)}</div>
-        </div>
-        <div class="row-amount ${Number(t.amount) >= 0 ? 'plus' : 'minus'}">${Number(t.amount) >= 0 ? '+' : '-'}${money(Math.abs(t.amount))}</div>
+  // 审批只在独立「审核」页处理：账户页仅提示待审核数量并引导跳转
+  const pendingGo = pending.length ? `
+    <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
+      <div class="row-main">
+        <div class="row-title">⏳ ${pending.length} 笔待审核申请</div>
+        <div class="row-sub">存钱 / 取钱 / 消费，统一在「审核」页处理</div>
       </div>
-      <div class="btn-row">
-        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">${Number(t.amount) >= 0 ? '确认入账' : '通过'}</button>
-        <button class="btn" onclick="reviewTx(${t.id},'reject')">驳回</button>
-      </div>
-    </div>`).join('') || '<div class="empty">暂无待审核的存取申请 🎉</div>';
+      <button class="btn ok" onclick="setTab('reviews')">去审核</button>
+    </div>` : '';
 
   const goalList = goals.map((g) => `
     <div class="card ${g.status === 'achieved' ? 'achieved' : ''}">
@@ -392,8 +386,7 @@ async function parentChildAccount(childId) {
       </div>
       <p class="hint">「家长存入」即家长扮演银行直接入账（零花钱/压岁钱等），可关联孩子目标；存取类申请审批后才会入账或扣款。</p>
     </div>
-    <h3 class="sec-title">待审核申请（存钱 / 取钱 / 消费）</h3>
-    ${pendingList}
+    ${pendingGo}
     <h3 class="sec-title">储蓄目标</h3>
     ${goalList}
     <h3 class="sec-title">定期存款</h3>
@@ -765,18 +758,20 @@ async function childMoney() {
     <div class="card">
       <h3>🏦 取钱（需家长审核）</h3>
       <form onsubmit="takeMoney(event,'withdraw')" class="vform">
-        <div class="field"><input id="w-amount" type="number" step="0.5" min="0.5" placeholder="取款金额(元)" required></div>
+        <div class="field"><input id="w-amount" type="number" step="0.5" min="0.5" max="${acc.available_balance}" placeholder="取款金额(元)" required></div>
         <div class="field"><input id="w-desc" placeholder="用途(可选)"></div>
         <button class="btn primary btn-block">申请取款</button>
       </form>
+      <p class="hint">可申请取款上限 ${money(acc.available_balance)}（仅活期可用余额；定期金额不可取，待审核取款已冻结）。</p>
     </div>
     <div class="card">
       <h3>🛒 消费（需家长审核）</h3>
       <form onsubmit="takeMoney(event,'consume')" class="vform">
-        <div class="field"><input id="c-amount" type="number" step="0.5" min="0.5" placeholder="消费金额(元)" required></div>
+        <div class="field"><input id="c-amount" type="number" step="0.5" min="0.5" max="${acc.available_balance}" placeholder="消费金额(元)" required></div>
         <div class="field"><input id="c-desc" placeholder="买了什么(可选)"></div>
         <button class="btn warn btn-block">提交消费</button>
       </form>
+      <p class="hint">可消费上限 ${money(acc.available_balance)}（仅活期可用余额；定期金额不可用，待审核取款已冻结）。</p>
     </div>
     ${recent.length ? `<h3 class="sec-title">最近流水</h3>` + recent.map(txItem).join('') : ''}`;
 }

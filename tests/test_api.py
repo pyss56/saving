@@ -402,6 +402,32 @@ class SavingsApiTest(unittest.TestCase):
         r = c.post('/api/transactions/%d/cancel' % w2['id'], headers=self.header(ch), json={})
         self.assertEqual(r.status_code, 400)
 
+    def test_term_not_withdrawable(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 活期 20 → 转存 10 元定期：活期余额剩 10，定期 10
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 7})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 10, places=2)
+        self.assertAlmostEqual(acc['term_balance'], 10, places=2)
+        self.assertAlmostEqual(acc['available_balance'], 10, places=2)
+
+        # 定期金额不可取：申请取款 15（想动用定期部分）应被拒绝
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 15})
+        self.assertEqual(r.status_code, 400)
+
+        # 只取活期部分可以
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 10})
+        self.assertTrue(r.get_json()['ok'])
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')
