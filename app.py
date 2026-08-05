@@ -62,9 +62,18 @@ def load_schema():
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript(load_schema())
+    migrate_db(db)
     db.commit()
     db.close()
     seed_if_empty()
+
+
+def migrate_db(db):
+    """轻量迁移：为已存在的数据库补齐新增字段，保证旧库升级后可用。"""
+    cols = [r[1] for r in db.execute('PRAGMA table_info(transactions)').fetchall()]
+    if 'cancelled_at' not in cols:
+        db.execute('ALTER TABLE transactions ADD COLUMN cancelled_at TEXT')
+    db.commit()
 
 
 def reset_db():
@@ -183,10 +192,16 @@ def credit(db, child_id, amount, type_, description='', goal_id=None,
 
 
 def create_pending_debit(db, child_id, amount, type_, description=''):
-    """取钱/消费：创建待家长审核的扣款单，不立即扣账。"""
+    """取钱/消费：创建待家长审核的扣款单，不立即扣账，但立即冻结对应金额。
+
+    可用余额 = 账户余额 - 已冻结的待审核支出，保证不会因多笔待审核取款而超取成负数。
+    """
     acc = get_account(db, child_id)
-    if float(acc['balance']) < amount:
-        raise ValueError('余额不足')
+    _, pending_withdraw = pending_amounts(db, child_id)
+    available = round(float(acc['balance']) - pending_withdraw, 2)
+    if amount > available:
+        raise ValueError('可用余额不足（待审核取款已冻结 %s 元，可用 %s 元）'
+                         % (fmt_money(pending_withdraw), fmt_money(available)))
     cur = db.execute(
         "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, description, "
         "status, created_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -194,6 +209,11 @@ def create_pending_debit(db, child_id, amount, type_, description=''):
     )
     db.commit()
     return cur.lastrowid
+
+
+def fmt_money(v):
+    """金额显示：xx.xx 元"""
+    return '%.2f' % round(float(v or 0), 2)
 
 
 def create_pending_credit(db, child_id, amount, type_, description='', goal_id=None):
@@ -209,18 +229,30 @@ def create_pending_credit(db, child_id, amount, type_, description='', goal_id=N
 
 
 def review_pending_tx(db, tx_id, parent_id, action):
-    """家长审核待处理的存款/取款/消费单。"""
+    """家长审核待处理的存款/取款/消费单（并发安全）。
+
+    通过「UPDATE ... WHERE status='pending'」原子占位：审核与取消并发时，
+    只有先执行成功的一方生效，另一方 rowcount=0 会抛错，避免重复入账/重复扣款。
+    """
     tx = db.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
-    if not tx or tx['status'] != 'pending':
-        raise ValueError('该单据不可审核')
+    if not tx:
+        raise ValueError('该单据不存在')
     if not is_child_of(parent_id, tx['child_id']):
         raise ValueError('无权审核该单据')
     if action == 'approve':
         acc = get_account(db, tx['child_id'])
+        # 取款/消费通过时复核余额，防止审核期间可用余额变化导致扣成负数
+        if float(tx['amount']) < 0 and float(acc['balance']) < -float(tx['amount']):
+            raise ValueError('余额不足，无法通过该取款')
         new_balance = round(float(acc['balance']) + float(tx['amount']), 2)  # amount 正负皆可
+        cur = db.execute(
+            "UPDATE transactions SET status='approved', balance_after=?, reviewed_by=?, "
+            "reviewed_at=? WHERE id=? AND status='pending'",
+            (new_balance, parent_id, now_str(), tx_id))
+        if cur.rowcount != 1:
+            db.rollback()
+            raise ValueError('该单据已被处理，无法重复审核')
         db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
-        db.execute("UPDATE transactions SET status='approved', balance_after=?, reviewed_by=?, "
-                   "reviewed_at=? WHERE id=?", (new_balance, parent_id, now_str(), tx_id))
         # 存款入账后同步目标进度
         if float(tx['amount']) > 0 and tx['goal_id']:
             goal = db.execute('SELECT * FROM goals WHERE id=? AND child_id=?',
@@ -233,8 +265,12 @@ def review_pending_tx(db, tx_id, parent_id, action):
                 else:
                     db.execute('UPDATE goals SET saved_amount=? WHERE id=?', (new_saved, tx['goal_id']))
     else:
-        db.execute("UPDATE transactions SET status='rejected', reviewed_by=?, reviewed_at=? WHERE id=?",
-                   (parent_id, now_str(), tx_id))
+        cur = db.execute(
+            "UPDATE transactions SET status='rejected', reviewed_by=?, reviewed_at=? "
+            "WHERE id=? AND status='pending'", (parent_id, now_str(), tx_id))
+        if cur.rowcount != 1:
+            db.rollback()
+            raise ValueError('该单据已被处理，无法重复审核')
     db.commit()
 
 
@@ -364,8 +400,28 @@ def me():
     return ok(user=g.user)
 
 
+def pending_amounts(db, child_id):
+    """待处理金额：返回 (待确认入账合计, 待冻结支出合计)。
+
+    待确认入账 = 待家长确认的存钱/入账申请（尚未入账，正数）；
+    待冻结支出 = 待家长审核的取钱/消费申请（尚未扣款，已从可用余额中冻结）。
+    """
+    rows = db.execute(
+        "SELECT amount FROM transactions WHERE child_id=? AND status='pending'",
+        (child_id,)).fetchall()
+    deposit = 0.0
+    withdraw = 0.0
+    for r in rows:
+        amt = float(r['amount'])
+        if amt > 0:
+            deposit += amt
+        else:
+            withdraw += -amt
+    return round(deposit, 2), round(withdraw, 2)
+
+
 def account_payload(db, child_id):
-    """组装某孩子的完整储蓄账户信息（活期余额/利率阶梯/定期存款）。"""
+    """组装某孩子的完整储蓄账户信息（活期余额/利率阶梯/定期存款/待处理金额）。"""
     acc = get_account(db, child_id)
     tiers = get_tiers(db, child_id)
     eff = effective_annual_rate(db, child_id, float(acc['balance']))
@@ -374,12 +430,17 @@ def account_payload(db, child_id):
         'SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
         (child_id,)).fetchall()]
     term_balance = round(sum(float(d['amount']) for d in deposits if d['status'] == 'active'), 2)
+    pending_deposit, pending_withdraw = pending_amounts(db, child_id)
+    available = round(float(acc['balance']) - pending_withdraw, 2)
     return {'id': acc['id'], 'child_id': acc['child_id'],
             'balance': acc['balance'], 'interest_rate': acc['interest_rate'],
             'last_interest_at': acc['last_interest_at'],
             'tiers': tiers, 'effective_rate': eff,
             'term_tiers': term_tiers, 'term_deposits': deposits,
-            'term_balance': term_balance}
+            'term_balance': term_balance,
+            'pending_deposit': pending_deposit,
+            'pending_withdraw': pending_withdraw,
+            'available_balance': available}
 
 
 @app.route('/api/me/account')
@@ -1187,8 +1248,6 @@ def create_transaction():
                                   description=data.get('description') or '存入零花钱', goal_id=goal_id)
             return ok(msg='存款申请已提交，等待家长确认入账', balance=float(acc['balance']))
         if ttype in ('withdraw', 'consume'):
-            if float(acc['balance']) < amount:
-                return error('余额不足')
             label = '取款' if ttype == 'withdraw' else '消费'
             create_pending_debit(db, g.user['id'], amount, ttype,
                                  description=data.get('description') or label)
@@ -1229,6 +1288,27 @@ def review_transaction(tx_id):
     except ValueError as e:
         return error(str(e))
     return ok(msg='处理完成')
+
+
+@app.route('/api/transactions/<int:tx_id>/cancel', methods=['POST'])
+@require_child
+def cancel_transaction(tx_id):
+    """孩子取消自己的待审批申请（存钱/取钱/消费）。
+
+    仅当单据仍为 pending 时生效（与家长审核并发安全：谁先处理谁生效）。
+    """
+    db = get_db()
+    tx = db.execute('SELECT * FROM transactions WHERE id=? AND child_id=?',
+                    (tx_id, g.user['id'])).fetchone()
+    if not tx:
+        return error('单据不存在')
+    cur = db.execute(
+        "UPDATE transactions SET status='rejected', cancelled_at=?, reviewed_at=? "
+        "WHERE id=? AND status='pending'", (now_str(), now_str(), tx_id))
+    db.commit()
+    if cur.rowcount != 1:
+        return error('该单据已被处理，无法取消')
+    return ok(msg='已取消该申请')
 
 
 # ---------------- 静态前端(PWA) ----------------

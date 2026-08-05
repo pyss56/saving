@@ -335,6 +335,73 @@ class SavingsApiTest(unittest.TestCase):
                    headers=self.header(p2), json={'amount': 1})
         self.assertEqual(r.status_code, 400)
 
+    def test_pending_freeze_and_cancel(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # --- 取款冻结：余额 20，取 15 后可用 5，再取 10 应被拒绝 ---
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 15})
+        self.assertTrue(r.get_json()['ok'])
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 10})
+        self.assertEqual(r.status_code, 400)
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['pending_withdraw'], 15, places=2)
+        self.assertAlmostEqual(acc['available_balance'], 5, places=2)
+        self.assertAlmostEqual(acc['balance'], 20, places=2)  # 未扣款
+
+        # --- 取消取款 → 冻结解除 ---
+        txs = c.get('/api/transactions', headers=self.header(ch)).get_json()['transactions']
+        wtx = next(t for t in txs if t['status'] == 'pending' and t['type'] == 'withdraw')
+        r = c.post('/api/transactions/%d/cancel' % wtx['id'], headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['pending_withdraw'], 0, places=2)
+        self.assertAlmostEqual(acc['available_balance'], 20, places=2)
+        txs = c.get('/api/transactions', headers=self.header(ch)).get_json()['transactions']
+        self.assertIsNotNone(next(t for t in txs if t['id'] == wtx['id'])['cancelled_at'])
+
+        # --- 存款待确认显示（未入账前 balance 不变） ---
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'save', 'amount': 10})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['pending_deposit'], 10, places=2)
+        self.assertAlmostEqual(acc['balance'], 20, places=2)
+
+        # --- 取消存款 → 待确认归零，且不能再审核/再取消（并发/重复防护） ---
+        txs = c.get('/api/transactions', headers=self.header(ch)).get_json()['transactions']
+        stx = next(t for t in txs if t['status'] == 'pending' and t['type'] == 'save')
+        r = c.post('/api/transactions/%d/cancel' % stx['id'], headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['pending_deposit'], 0, places=2)
+        r = c.patch('/api/transactions/%d/review' % stx['id'], headers=self.header(p),
+                    json={'action': 'approve'})
+        self.assertEqual(r.status_code, 400)  # 已取消，审核应失败
+        r = c.post('/api/transactions/%d/cancel' % stx['id'], headers=self.header(ch), json={})
+        self.assertEqual(r.status_code, 400)  # 已取消，再取消应失败
+
+        # --- 审核通过取款正常扣款，且复核余额 ---
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 5})
+        self.assertTrue(r.get_json()['ok'])
+        txs = c.get('/api/transactions', headers=self.header(ch)).get_json()['transactions']
+        w2 = next(t for t in txs if t['status'] == 'pending' and t['type'] == 'withdraw')
+        r = c.patch('/api/transactions/%d/review' % w2['id'], headers=self.header(p),
+                    json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 15, places=2)  # 20 - 5
+
+        # --- 已入账的不能取消 ---
+        r = c.post('/api/transactions/%d/cancel' % w2['id'], headers=self.header(ch), json={})
+        self.assertEqual(r.status_code, 400)
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

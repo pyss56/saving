@@ -297,6 +297,7 @@ function rateLabel(ch) {
 /* ---------- 储蓄账户查看与管理 ---------- */
 function openChildAccount(childId) {
   window.__childAccount = childId;
+  tab = 'children'; // 从总览等任意页进入时切到「孩子」页签再渲染账户视图
   render();
 }
 function closeChildAccount() {
@@ -321,6 +322,10 @@ async function parentChildAccount(childId) {
   const rateText = (acc.tiers && acc.tiers.length)
     ? `阶梯 ${acc.tiers.length} 档 · 当前综合 ${(Number(acc.effective_rate) * 100).toFixed(1)}%`
     : `年利率 ${(Number(acc.interest_rate) * 100).toFixed(1)}%`;
+  const pendingTxt = [];
+  if (acc.pending_deposit > 0) pendingTxt.push(`待确认存入 ${money(acc.pending_deposit)}`);
+  if (acc.pending_withdraw > 0) pendingTxt.push(`待审核冻结 ${money(acc.pending_withdraw)}`);
+  const pendingLine = pendingTxt.length ? `<div class="hero-pending">⏳ ${pendingTxt.join(' · ')}</div>` : '';
 
   const pendingList = pending.map((t) => `
     <div class="card">
@@ -369,6 +374,7 @@ async function parentChildAccount(childId) {
       <div class="hero-label">${esc(ch.name)} 的储蓄账户 · ${esc(ch.username)}</div>
       <div class="hero-balance">${money(acc.balance)}</div>
       <div class="hero-sub">活期${acc.term_balance > 0 ? ` · 定期 ${money(acc.term_balance)}` : ''} · ${rateText}</div>
+      ${pendingLine}
     </div>
     <div class="stat-row">
       <div class="stat-card"><div class="stat-num">${pending.length}</div><div class="stat-label">待审核申请</div></div>
@@ -649,12 +655,16 @@ const txItem = (t) => `
     <div class="row-main">
       <div class="row-title">${TYPE_LABEL[t.type] || t.type}
         ${t.status === 'pending' ? '<span class="tag pending">待审核</span>' : ''}
-        ${t.status === 'rejected' ? '<span class="tag">已驳回</span>' : ''}</div>
+        ${t.status === 'rejected' && t.cancelled_at ? '<span class="tag">已取消</span>' : ''}
+        ${t.status === 'rejected' && !t.cancelled_at ? '<span class="tag">已驳回</span>' : ''}</div>
       <div class="row-sub">${esc(t.description || '')} · ${fmtDate(t.created_at)}</div>
     </div>
     <div class="row-amount ${Number(t.amount) >= 0 ? 'plus' : 'minus'}">
       ${Number(t.amount) >= 0 ? '+' : ''}${money(t.amount)}</div>
-  </div>`;
+  </div>
+  ${t.status === 'pending' && user.role === 'child'
+    ? `<div class="btn-row" style="margin-top:0"><button class="btn ghost" onclick="cancelTx(${t.id})">取消申请</button></div>`
+    : ''}`;
 
 const goalPct = (g) => (g.target_amount > 0 ? Math.min(100, Math.round((g.saved_amount / g.target_amount) * 100)) : 0);
 
@@ -666,12 +676,18 @@ async function childOverview() {
     ? `阶梯利率 · 当前综合 ${(Number(acc.effective_rate) * 100).toFixed(1)}%`
     : `年利率 ${(Number(acc.interest_rate) * 100).toFixed(1)}%`;
   const termText = acc.term_balance > 0 ? ` · 定期 ${money(acc.term_balance)}` : '';
+  const pendingText = [];
+  if (acc.pending_deposit > 0) pendingText.push(`待确认存入 ${money(acc.pending_deposit)}`);
+  if (acc.pending_withdraw > 0) pendingText.push(`待审核取款 ${money(acc.pending_withdraw)} 已冻结`);
+  const pendingLine = pendingText.length
+    ? `<div class="hero-pending">⏳ ${pendingText.join(' · ')}</div>` : '';
   return `
     <div class="hero">
       <div class="hero-emoji">🐷</div>
       <div class="hero-label">我的储蓄罐</div>
       <div class="hero-balance">${money(acc.balance)}</div>
       <div class="hero-sub">活期余额${termText} · ${rateText}</div>
+      ${pendingLine}
     </div>
     <div class="quick-grid">
       <button class="quick" onclick="setTab('money')">💰 存取钱</button>
@@ -707,8 +723,14 @@ async function childMoney() {
   const deposits = (acc.term_deposits || []).filter((d) => d.status === 'active');
   const recent = (await api('GET', '/transactions')).transactions.slice(0, 5);
   const dayOptions = termDaysOptions(acc.term_tiers);
+  const pendingDepositLine = acc.pending_deposit > 0
+    ? `<div class="card balance-card pending"><span>待确认存入（家长确认后入账）</span><b>${money(acc.pending_deposit)}</b></div>` : '';
+  const frozenLine = acc.pending_withdraw > 0
+    ? `<div class="card balance-card"><span>可用余额（已冻结待审核 ${money(acc.pending_withdraw)}）</span><b>${money(acc.available_balance)}</b></div>` : '';
   return `
     <div class="card balance-card"><span>活期余额</span><b>${money(acc.balance)}</b></div>
+    ${pendingDepositLine}
+    ${frozenLine}
     ${acc.term_balance > 0 ? `<div class="card balance-card"><span>定期合计</span><b>${money(acc.term_balance)}</b></div>` : ''}
     <div class="card">
       <h3>💰 存钱</h3>
@@ -946,6 +968,13 @@ async function reviewTask(id, action) {
 async function reviewTx(id, action) {
   try {
     const r = await api('PATCH', '/transactions/' + id + '/review', { action });
+    alert(r.msg); render();
+  } catch (err) { alert(err.message); }
+}
+async function cancelTx(id) {
+  if (!confirm('确定取消这条申请吗？')) return;
+  try {
+    const r = await api('POST', '/transactions/' + id + '/cancel');
     alert(r.msg); render();
   } catch (err) { alert(err.message); }
 }

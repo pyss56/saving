@@ -180,8 +180,13 @@ h1, h2, h3 { font-weight: 700; }
 .hero-label { font-size: 13px; opacity: .9; margin-top: 4px; }
 .hero-balance { font-size: 34px; font-weight: 800; margin: 6px 0; text-shadow: 0 2px 6px rgba(0,0,0,.08); }
 .hero-sub { font-size: 12px; opacity: .9; }
+.hero-pending {
+  display: inline-block; margin-top: 10px; font-size: 12px; font-weight: 600;
+  background: rgba(255, 255, 255, .25); border-radius: 999px; padding: 5px 14px;
+}
 .balance-card { font-size: 15px; display: flex; justify-content: space-between; align-items: center; }
 .balance-card b { font-size: 22px; color: var(--primary-deep); }
+.balance-card.pending b { color: #c99a00; }
 
 /* ---------- 进度条 ---------- */
 .progress {

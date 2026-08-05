@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS goals (
 -- 资金流水：所有存钱/支出/奖励/利息/惩罚均形成记录
 -- type: task_reward 任务奖励, punish 惩罚扣款, save 存钱, withdraw 取钱,
 --       consume 消费, interest 利息, parent_deposit 家长存入
--- amount 正数=收入, 负数=支出; status: pending=待家长审核, approved=已入账, rejected=已驳回
+-- amount 正数=收入, 负数=支出; status: pending=待家长审核, approved=已入账, rejected=已驳回/已取消
 CREATE TABLE IF NOT EXISTS transactions (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   child_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS transactions (
   related_task_id INTEGER REFERENCES tasks(id) ON DELETE SET NULL,
   reviewed_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
   reviewed_at     TEXT,
+  cancelled_at    TEXT,
   created_at      TEXT    DEFAULT (datetime('now','localtime'))
 );
 
