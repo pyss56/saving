@@ -266,6 +266,75 @@ class SavingsApiTest(unittest.TestCase):
         self.assertAlmostEqual(acc['balance'], 20.82, places=2)
         self.assertAlmostEqual(acc['term_balance'], 0.0, places=2)
 
+    def test_parent_account_view_and_deposit(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 家长查看孩子完整储蓄账户
+        r = c.get('/api/children/%d/account' % child1['id'], headers=self.header(p))
+        self.assertTrue(r.get_json()['ok'])
+        acc = r.get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20, places=2)  # 初始 20
+        self.assertIn('term_balance', acc)
+        self.assertIn('tiers', acc)
+        self.assertIn('term_deposits', acc)
+
+        # 家长查看孩子目标（初始为空）
+        r = c.get('/api/children/%d/goals' % child1['id'], headers=self.header(p))
+        self.assertTrue(r.get_json()['ok'])
+        self.assertEqual(len(r.get_json()['goals']), 0)
+
+        # 孩子建目标，家长存入并关联 → 立即入账并同步目标进度
+        r = c.post('/api/goals', headers=self.header(ch),
+                   json={'name': '新书包', 'target_amount': 30})
+        self.assertTrue(r.get_json()['ok'])
+        goal_id = r.get_json()['id']
+        r = c.post('/api/children/%d/deposit' % child1['id'], headers=self.header(p),
+                   json={'amount': 10, 'goal_id': goal_id, 'description': '压岁钱'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/children/%d/account' % child1['id'],
+                    headers=self.header(p)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 30, places=2)  # 20 + 10
+        goals = c.get('/api/children/%d/goals' % child1['id'],
+                      headers=self.header(p)).get_json()['goals']
+        self.assertAlmostEqual(goals[0]['saved_amount'], 10, places=2)
+
+        # 流水包含 parent_deposit
+        txs = c.get('/api/transactions?child_id=%d' % child1['id'],
+                    headers=self.header(p)).get_json()['transactions']
+        self.assertTrue(any(t['type'] == 'parent_deposit' for t in txs))
+
+        # 金额校验
+        r = c.post('/api/children/%d/deposit' % child1['id'],
+                   headers=self.header(p), json={'amount': 0})
+        self.assertEqual(r.status_code, 400)
+
+        # 孩子提交存钱申请 → 家长按 child_id 过滤待审核并确认
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'save', 'amount': 5})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews?child_id=%d' % child1['id'],
+                        headers=self.header(p)).get_json()['reviews']
+        self.assertTrue(any(t['type'] == 'save' for t in reviews))
+        tx = next(t for t in reviews if t['type'] == 'save')
+        r = c.patch('/api/transactions/%d/review' % tx['id'],
+                    headers=self.header(p), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 无权限：新家长（未绑定 child1）不能查看/存入
+        r = c.post('/api/children', headers=self.header(p),
+                   json={'role': 'parent', 'username': 'parent2', 'password': '123456', 'name': '家长2'})
+        self.assertTrue(r.get_json()['ok'])
+        p2 = self.auth('parent2')
+        r = c.get('/api/children/%d/account' % child1['id'], headers=self.header(p2))
+        self.assertEqual(r.status_code, 400)
+        r = c.post('/api/children/%d/deposit' % child1['id'],
+                   headers=self.header(p2), json={'amount': 1})
+        self.assertEqual(r.status_code, 400)
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

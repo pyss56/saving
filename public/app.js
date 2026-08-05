@@ -233,12 +233,12 @@ async function parentOverview() {
     </div>
     ${c.children.length === 0
       ? '<div class="empty">还没有绑定孩子，请到「孩子」页绑定</div>'
-      : `<h3 class="sec-title">孩子账户</h3>` + c.children.map((ch) => `
-        <div class="card row-card">
+      : `<h3 class="sec-title">孩子账户（点卡片查看完整账户）</h3>` + c.children.map((ch) => `
+        <div class="card row-card clickable" onclick="openChildAccount(${ch.id})">
           <div class="avatar">${esc(ch.name[0])}</div>
           <div class="row-main">
             <div class="row-title">${esc(ch.name)} <span class="tag">${esc(ch.username)}</span></div>
-            <div class="row-sub">年利率 ${(Number(ch.interest_rate) * 100).toFixed(1)}%</div>
+            <div class="row-sub">活期 ${money(ch.balance)}${ch.term_balance > 0 ? ` · 定期 ${money(ch.term_balance)}` : ''}</div>
           </div>
           <div class="row-amount">${money(ch.balance)}</div>
         </div>`).join('')}
@@ -251,6 +251,7 @@ async function parentOverview() {
 }
 
 async function parentChildren() {
+  if (window.__childAccount) return parentChildAccount(window.__childAccount);
   const c = await api('GET', '/children');
   window.__childrenData = c.children; // 供阶梯利率弹窗读取
   return `
@@ -274,6 +275,7 @@ async function parentChildren() {
           </div>
         </div>
         <div class="btn-row">
+          <button class="btn ok" onclick="openChildAccount(${ch.id})">🏦 储蓄账户</button>
           <button class="btn" onclick="tierModal(${ch.id})">📈 活期利率</button>
           <button class="btn" onclick="termTierModal(${ch.id})">⏱ 定期利率</button>
           <button class="btn" onclick="settleInterest(${ch.id})">结息</button>
@@ -281,7 +283,7 @@ async function parentChildren() {
           <button class="btn ghost" onclick="unbindChild(${ch.id})">解绑</button>
         </div>
       </div>`).join('')}
-    <p class="hint">可用「创建账号」为孩子建号并自动绑定，或创建新的家长账号；若孩子已自行注册，也可输入其用户名绑定。</p>`;
+    <p class="hint">可用「创建账号」为孩子建号并自动绑定，或创建新的家长账号；若孩子已自行注册，也可输入其用户名绑定。点「🏦 储蓄账户」可查看该孩子完整账户、审批存取申请并管理。</p>`;
 }
 
 function rateLabel(ch) {
@@ -290,6 +292,139 @@ function rateLabel(ch) {
     : (Number(ch.interest_rate) * 100).toFixed(1);
   if (ch.tiers && ch.tiers.length) return `阶梯 ${ch.tiers.length} 档 · 当前综合 ${eff}%`;
   return `年利率 ${eff}%`;
+}
+
+/* ---------- 储蓄账户查看与管理 ---------- */
+function openChildAccount(childId) {
+  window.__childAccount = childId;
+  render();
+}
+function closeChildAccount() {
+  window.__childAccount = null;
+  render();
+}
+
+async function parentChildAccount(childId) {
+  const [childrenData, accData, goalsData, txsData, reviewsData] = await Promise.all([
+    api('GET', '/children'),
+    api('GET', '/children/' + childId + '/account'),
+    api('GET', '/children/' + childId + '/goals'),
+    api('GET', '/transactions?child_id=' + childId),
+    api('GET', '/reviews?child_id=' + childId),
+  ]);
+  const ch = childrenData.children.find((x) => x.id === childId) || { name: '孩子', username: '' };
+  const acc = accData.account;
+  const goals = goalsData.goals;
+  const txs = txsData.transactions;
+  const pending = reviewsData.reviews;
+
+  const rateText = (acc.tiers && acc.tiers.length)
+    ? `阶梯 ${acc.tiers.length} 档 · 当前综合 ${(Number(acc.effective_rate) * 100).toFixed(1)}%`
+    : `年利率 ${(Number(acc.interest_rate) * 100).toFixed(1)}%`;
+
+  const pendingList = pending.map((t) => `
+    <div class="card">
+      <div class="row-card">
+        <div class="avatar">${TYPE_ICON[t.type] || '💸'}</div>
+        <div class="row-main">
+          <div class="row-title">${TYPE_LABEL[t.type] || t.type} <span class="tag pending">待审核</span></div>
+          <div class="row-sub">${esc(t.description || '')} · ${fmtDate(t.created_at)}</div>
+        </div>
+        <div class="row-amount ${Number(t.amount) >= 0 ? 'plus' : 'minus'}">${Number(t.amount) >= 0 ? '+' : '-'}${money(Math.abs(t.amount))}</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">${Number(t.amount) >= 0 ? '确认入账' : '通过'}</button>
+        <button class="btn" onclick="reviewTx(${t.id},'reject')">驳回</button>
+      </div>
+    </div>`).join('') || '<div class="empty">暂无待审核的存取申请 🎉</div>';
+
+  const goalList = goals.map((g) => `
+    <div class="card ${g.status === 'achieved' ? 'achieved' : ''}">
+      <div class="row-main">
+        <div class="row-title">${esc(g.name)}
+          <span class="tag">${g.status === 'achieved' ? '已达成 🎉' : g.status === 'cancelled' ? '已取消' : '进行中'}</span></div>
+        <div class="row-sub">${money(g.saved_amount)} / ${money(g.target_amount)}${g.deadline ? ' · 截止 ' + g.deadline : ''}</div>
+      </div>
+      <div class="progress"><div class="progress-bar" style="width:${goalPct(g)}%"></div></div>
+    </div>`).join('') || '<div class="empty">还没有储蓄目标</div>';
+
+  const activeDeposits = (acc.term_deposits || []).filter((d) => d.status === 'active');
+  const depositList = activeDeposits.map((d) => `
+    <div class="card row-card">
+      <div class="avatar">🏦</div>
+      <div class="row-main">
+        <div class="row-title">${money(d.amount)} <span class="tag">${d.term_days} 天 · 年利率 ${(Number(d.rate) * 100).toFixed(1)}%</span></div>
+        <div class="row-sub">${fmtDate(d.mature_at)} 到期${isMatured(d) ? ' · 已到期可结算' : ''}</div>
+      </div>
+    </div>`).join('') || '<div class="empty">没有进行中的定期存款</div>';
+
+  const txList = (txs.length ? txs.slice(0, 30).map(txItem).join('') : '<div class="empty">暂无流水记录</div>');
+
+  return `
+    <div class="back-bar">
+      <button class="btn ghost" onclick="closeChildAccount()">← 返回孩子列表</button>
+    </div>
+    <div class="hero">
+      <div class="hero-emoji">🏦</div>
+      <div class="hero-label">${esc(ch.name)} 的储蓄账户 · ${esc(ch.username)}</div>
+      <div class="hero-balance">${money(acc.balance)}</div>
+      <div class="hero-sub">活期${acc.term_balance > 0 ? ` · 定期 ${money(acc.term_balance)}` : ''} · ${rateText}</div>
+    </div>
+    <div class="stat-row">
+      <div class="stat-card"><div class="stat-num">${pending.length}</div><div class="stat-label">待审核申请</div></div>
+      <div class="stat-card"><div class="stat-num">${goals.filter((g) => g.status === 'active').length}</div><div class="stat-label">进行中目标</div></div>
+      <div class="stat-card"><div class="stat-num">${activeDeposits.length}</div><div class="stat-label">定期存款</div></div>
+    </div>
+    <div class="card">
+      <h3>🛠 账户管理</h3>
+      <div class="btn-row" style="margin-top:0">
+        <button class="btn ok" onclick="depositModal(${childId},'${esc(ch.name)}')">💵 家长存入</button>
+        <button class="btn" onclick="tierModal(${childId})">📈 活期利率</button>
+        <button class="btn" onclick="termTierModal(${childId})">⏱ 定期利率</button>
+        <button class="btn" onclick="settleInterest(${childId})">💸 结息</button>
+        <button class="btn warn" onclick="punishModal(${childId},'${esc(ch.name)}')">🚫 惩罚</button>
+      </div>
+      <p class="hint">「家长存入」即家长扮演银行直接入账（零花钱/压岁钱等），可关联孩子目标；存取类申请审批后才会入账或扣款。</p>
+    </div>
+    <h3 class="sec-title">待审核申请（存钱 / 取钱 / 消费）</h3>
+    ${pendingList}
+    <h3 class="sec-title">储蓄目标</h3>
+    ${goalList}
+    <h3 class="sec-title">定期存款</h3>
+    ${depositList}
+    <div class="btn-row"><button class="btn ok" onclick="settleTerm()">结算到期定期</button></div>
+    <h3 class="sec-title">资金流水（最近 30 条）</h3>
+    ${txList}`;
+}
+
+async function depositModal(childId, name) {
+  const g = await api('GET', '/children/' + childId + '/goals');
+  const activeGoals = g.goals.filter((x) => x.status === 'active');
+  const goalOpts = '<option value="">不关联目标</option>' +
+    activeGoals.map((x) => `<option value="${x.id}">${esc(x.name)}</option>`).join('');
+  openModal(`
+    <h3>💵 家长存入 · ${esc(name)}</h3>
+    <p class="hint">家长扮演银行：现场给孩子零花钱、压岁钱等，直接入账。</p>
+    <form onsubmit="submitDeposit(event, ${childId})" class="vform">
+      <div class="field"><input id="dp-amount" type="number" step="0.5" min="0.5" placeholder="存入金额(元)" required></div>
+      <div class="field"><select id="dp-goal">${goalOpts}</select></div>
+      <div class="field"><input id="dp-desc" placeholder="备注(可选)，如：压岁钱"></div>
+      <div class="btn-row">
+        <button class="btn ghost" type="button" onclick="closeModal()">取消</button>
+        <button class="btn ok" type="submit">确认存入</button>
+      </div>
+    </form>`);
+}
+async function submitDeposit(e, childId) {
+  e.preventDefault();
+  try {
+    const r = await api('POST', '/children/' + childId + '/deposit', {
+      amount: parseFloat(document.getElementById('dp-amount').value),
+      goal_id: document.getElementById('dp-goal').value || null,
+      description: document.getElementById('dp-desc').value.trim(),
+    });
+    closeModal(); alert(r.msg); render();
+  } catch (err) { alert(err.message); }
 }
 
 /* ---------- 阶梯利率配置 ---------- */

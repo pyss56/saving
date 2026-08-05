@@ -364,24 +364,69 @@ def me():
     return ok(user=g.user)
 
 
+def account_payload(db, child_id):
+    """组装某孩子的完整储蓄账户信息（活期余额/利率阶梯/定期存款）。"""
+    acc = get_account(db, child_id)
+    tiers = get_tiers(db, child_id)
+    eff = effective_annual_rate(db, child_id, float(acc['balance']))
+    term_tiers = get_term_tiers(db, child_id)
+    deposits = [dict(r) for r in db.execute(
+        'SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
+        (child_id,)).fetchall()]
+    term_balance = round(sum(float(d['amount']) for d in deposits if d['status'] == 'active'), 2)
+    return {'id': acc['id'], 'child_id': acc['child_id'],
+            'balance': acc['balance'], 'interest_rate': acc['interest_rate'],
+            'last_interest_at': acc['last_interest_at'],
+            'tiers': tiers, 'effective_rate': eff,
+            'term_tiers': term_tiers, 'term_deposits': deposits,
+            'term_balance': term_balance}
+
+
 @app.route('/api/me/account')
 @require_child
 def my_account():
-    db = get_db()
-    acc = get_account(db, g.user['id'])
-    tiers = get_tiers(db, g.user['id'])
-    eff = effective_annual_rate(db, g.user['id'], float(acc['balance']))
-    term_tiers = get_term_tiers(db, g.user['id'])
-    deposits = [dict(r) for r in db.execute(
-        'SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
-        (g.user['id'],)).fetchall()]
-    term_balance = round(sum(float(d['amount']) for d in deposits if d['status'] == 'active'), 2)
-    return ok(account={'id': acc['id'], 'child_id': acc['child_id'],
-                       'balance': acc['balance'], 'interest_rate': acc['interest_rate'],
-                       'last_interest_at': acc['last_interest_at'],
-                       'tiers': tiers, 'effective_rate': eff,
-                       'term_tiers': term_tiers, 'term_deposits': deposits,
-                       'term_balance': term_balance})
+    return ok(account=account_payload(get_db(), g.user['id']))
+
+
+# ---------------- 家长查看/管理孩子储蓄账户 ----------------
+@app.route('/api/children/<int:child_id>/account')
+@require_parent
+def child_account_api(child_id):
+    """家长查看某孩子的完整储蓄账户（活期/定期/利率阶梯）。"""
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    return ok(account=account_payload(get_db(), child_id))
+
+
+@app.route('/api/children/<int:child_id>/goals')
+@require_parent
+def list_child_goals(child_id):
+    """家长查看某孩子的储蓄目标。"""
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    rows = get_db().execute(
+        'SELECT * FROM goals WHERE child_id=? ORDER BY status, id DESC', (child_id,)).fetchall()
+    return ok(goals=[dict(r) for r in rows])
+
+
+@app.route('/api/children/<int:child_id>/deposit', methods=['POST'])
+@require_parent
+def parent_deposit(child_id):
+    """家长直接存入（家长扮演银行，如现场给零花钱/压岁钱），立即入账并同步目标进度。"""
+    if not is_child_of(g.user['id'], child_id):
+        return error('无权操作')
+    data = request.get_json(silent=True) or {}
+    try:
+        amount = round(float(data.get('amount') or 0), 2)
+    except (TypeError, ValueError):
+        return error('金额格式不正确')
+    if amount <= 0:
+        return error('金额需大于 0')
+    goal_id = data.get('goal_id')
+    desc = (data.get('description') or '').strip() or '家长存入'
+    credit(get_db(), child_id, amount, 'parent_deposit',
+           description=desc, goal_id=goal_id, reviewed_by=g.user['id'])
+    return ok(msg='已存入孩子账户')
 
 
 # ---------------- 阶梯利率配置 ----------------
@@ -1157,11 +1202,18 @@ def create_transaction():
 @require_parent
 def list_pending_reviews():
     db = get_db()
-    rows = db.execute(
-        'SELECT t.*, u.name AS child_name FROM transactions t JOIN users u ON u.id=t.child_id '
-        'WHERE t.status=? AND t.child_id IN '
-        '(SELECT child_id FROM parent_child WHERE parent_id=?) ORDER BY t.id DESC',
-        ('pending', g.user['id'])).fetchall()
+    child_id = request.args.get('child_id', type=int)
+    if child_id and is_child_of(g.user['id'], child_id):
+        rows = db.execute(
+            'SELECT t.*, u.name AS child_name FROM transactions t JOIN users u ON u.id=t.child_id '
+            'WHERE t.status=? AND t.child_id=? ORDER BY t.id DESC',
+            ('pending', child_id)).fetchall()
+    else:
+        rows = db.execute(
+            'SELECT t.*, u.name AS child_name FROM transactions t JOIN users u ON u.id=t.child_id '
+            'WHERE t.status=? AND t.child_id IN '
+            '(SELECT child_id FROM parent_child WHERE parent_id=?) ORDER BY t.id DESC',
+            ('pending', g.user['id'])).fetchall()
     return ok(reviews=[dict(r) for r in rows])
 
 

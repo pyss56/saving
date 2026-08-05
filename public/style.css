@@ -160,6 +160,10 @@ h1, h2, h3 { font-weight: 700; }
   background: var(--card); border: 2px solid var(--line); border-radius: 16px;
   padding: 16px 10px; font-size: 14px; font-weight: 700; box-shadow: var(--shadow);
 }
+/* ---------- 储蓄账户（家长端子页） ---------- */
+.clickable { cursor: pointer; transition: transform .1s, box-shadow .1s; }
+.clickable:active { transform: scale(.985); box-shadow: none; }
+.back-bar { margin: 8px 0 12px; display: flex; }
 
 /* ---------- 儿童总览 hero ---------- */
 .hero {
