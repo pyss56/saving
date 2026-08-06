@@ -488,6 +488,58 @@ class SavingsApiTest(unittest.TestCase):
         r = c.post('/api/term-deposits/%d/settle' % dep2['id'], headers=self.header(p), json={})
         self.assertTrue(r.get_json()['ok'])
 
+    def test_any_parent_can_review(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+        # 新建一个未绑定 child1 的家长（非多租户：任意家长可审批）
+        r = c.post('/api/children', headers=self.header(p),
+                   json={'role': 'parent', 'username': 'stranger', 'password': '123456', 'name': '路人'})
+        self.assertTrue(r.get_json()['ok'])
+        p2 = self.auth('stranger')
+
+        # child1 提交存钱
+        r = c.post('/api/transactions', headers=self.header(ch), json={'type': 'save', 'amount': 8})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 未绑定家长也能在 /api/reviews 看到所有孩子的待审核
+        reviews = c.get('/api/reviews', headers=self.header(p2)).get_json()['reviews']
+        self.assertTrue(any(t['type'] == 'save' and t['child_id'] == 2 for t in reviews))
+
+        # 未绑定家长也能审批
+        tx = next(t for t in reviews if t['type'] == 'save')
+        r = c.patch('/api/transactions/%d/review' % tx['id'],
+                    headers=self.header(p2), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20 + 8, places=2)
+
+    def test_username_case_insensitive(self):
+        c = self.client
+        p = self.auth('parent1')
+
+        # 创建小写用户名
+        r = c.post('/api/children', headers=self.header(p),
+                   json={'role': 'child', 'username': 'demo', 'password': '123456', 'name': '演示'})
+        self.assertTrue(r.get_json()['ok'])
+
+        # 大小写不同的同名 → 拒绝（视为同一个）
+        r = c.post('/api/children', headers=self.header(p),
+                   json={'role': 'child', 'username': 'Demo', 'password': '123456', 'name': '演示2'})
+        self.assertEqual(r.status_code, 400)
+
+        # 登录大小写不敏感
+        r = c.post('/api/auth/login', json={'username': 'DEMO', 'password': '123456'})
+        self.assertEqual(r.status_code, 200)
+
+        # 绑定大小写不敏感
+        r = c.post('/api/children', headers=self.header(p),
+                   json={'role': 'parent', 'username': 'parentX', 'password': '123456', 'name': '家长X'})
+        self.assertTrue(r.get_json()['ok'])
+        px = self.auth('parentX')
+        r = c.post('/api/children/bind', headers=self.header(px), json={'username': 'Demo'})
+        self.assertTrue(r.get_json()['ok'])
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

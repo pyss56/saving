@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS users (
   created_at    TEXT    DEFAULT (datetime('now','localtime'))
 );
 
+-- 用户名大小写不敏感唯一（tina / Tina 视为同一个，不允许重复）
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci ON users (LOWER(username));
+
 -- 家长-儿童绑定关系
 CREATE TABLE IF NOT EXISTS parent_child (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,

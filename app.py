@@ -69,13 +69,20 @@ def init_db():
 
 
 def migrate_db(db):
-    """轻量迁移：为已存在的数据库补齐新增字段，保证旧库升级后可用。"""
+    """轻量迁移：为已存在的数据库补齐新增字段/索引，保证旧库升级后可用。"""
     def add_col(table, col, ddl):
         cols = [r[1] for r in db.execute('PRAGMA table_info(%s)' % table).fetchall()]
         if col not in cols:
             db.execute('ALTER TABLE %s ADD COLUMN %s' % (table, ddl))
     add_col('transactions', 'cancelled_at', 'cancelled_at TEXT')
     add_col('term_deposits', 'settled_at', 'settled_at TEXT')
+    # 用户名大小写不敏感唯一索引：仅当现库无大小写重复时才建，避免脏数据导致启动失败
+    dups = db.execute(
+        'SELECT LOWER(username) AS u, COUNT(*) AS c FROM users GROUP BY LOWER(username) HAVING c>1'
+    ).fetchall()
+    if not dups:
+        db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci '
+                   'ON users (LOWER(username))')
     db.commit()
 
 
@@ -240,8 +247,7 @@ def review_pending_tx(db, tx_id, parent_id, action):
     tx = db.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
     if not tx:
         raise ValueError('该单据不存在')
-    if not is_child_of(parent_id, tx['child_id']):
-        raise ValueError('无权审核该单据')
+    # 非多租户：任何家长都可以审批任何孩子的存取/消费申请
     if action == 'approve':
         acc = get_account(db, tx['child_id'])
         # 取款/消费通过时复核余额，防止审核期间可用余额变化导致扣成负数
@@ -336,13 +342,16 @@ def register():
     if role not in ('parent', 'child'):
         return error('角色不合法')
     db = get_db()
-    if db.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+    if db.execute('SELECT 1 FROM users WHERE LOWER(username)=LOWER(?)', (username,)).fetchone():
         return error('用户名已存在')
-    cur = db.execute(
-        'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
-        (username, generate_password_hash(password), name, role, now_str()),
-    )
-    uid = cur.lastrowid
+    try:
+        cur = db.execute(
+            'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
+            (username, generate_password_hash(password), name, role, now_str()),
+        )
+        uid = cur.lastrowid
+    except sqlite3.IntegrityError:
+        return error('用户名已存在')
     if role == 'child':
         db.execute('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,0,0.02)', (uid,))
     db.commit()
@@ -355,7 +364,7 @@ def login():
     username = (data.get('username') or '').strip()
     password = data.get('password') or ''
     db = get_db()
-    row = db.execute('SELECT * FROM users WHERE username=?', (username,)).fetchone()
+    row = db.execute('SELECT * FROM users WHERE LOWER(username)=LOWER(?)', (username,)).fetchone()
     if not row or not check_password_hash(row['password_hash'], password):
         return error('用户名或密码错误', 401)
     token = secrets.token_hex(32)
@@ -688,13 +697,16 @@ def create_child():
     if not name:
         return error('请填写昵称')
     db = get_db()
-    if db.execute('SELECT 1 FROM users WHERE username=?', (username,)).fetchone():
+    if db.execute('SELECT 1 FROM users WHERE LOWER(username)=LOWER(?)', (username,)).fetchone():
         return error('用户名已存在')
-    cur = db.execute(
-        'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
-        (username, generate_password_hash(password), name, role, now_str()),
-    )
-    uid = cur.lastrowid
+    try:
+        cur = db.execute(
+            'INSERT INTO users (username, password_hash, name, role, created_at) VALUES (?,?,?,?,?)',
+            (username, generate_password_hash(password), name, role, now_str()),
+        )
+        uid = cur.lastrowid
+    except sqlite3.IntegrityError:
+        return error('用户名已存在')
     if role == 'child':
         db.execute('INSERT INTO accounts (child_id, balance, interest_rate) VALUES (?,0,0.02)', (uid,))
         db.execute('INSERT INTO parent_child (parent_id, child_id) VALUES (?,?)', (g.user['id'], uid))
@@ -735,7 +747,8 @@ def bind_child():
     data = request.get_json(silent=True) or {}
     username = (data.get('username') or '').strip()
     db = get_db()
-    child = db.execute('SELECT * FROM users WHERE username=? AND role=?', (username, 'child')).fetchone()
+    child = db.execute('SELECT * FROM users WHERE LOWER(username)=LOWER(?) AND role=?',
+                       (username, 'child')).fetchone()
     if not child:
         return error('未找到该儿童账号')
     if db.execute('SELECT 1 FROM parent_child WHERE parent_id=? AND child_id=?',
@@ -1327,9 +1340,11 @@ def create_transaction():
 @app.route('/api/reviews')
 @require_parent
 def list_pending_reviews():
+    """待审核的存取/消费申请。非多租户：任何家长都能看到所有孩子的待审核；
+    可传 child_id 只查某个孩子的。"""
     db = get_db()
     child_id = request.args.get('child_id', type=int)
-    if child_id and is_child_of(g.user['id'], child_id):
+    if child_id:
         rows = db.execute(
             'SELECT t.*, u.name AS child_name FROM transactions t JOIN users u ON u.id=t.child_id '
             'WHERE t.status=? AND t.child_id=? ORDER BY t.id DESC',
@@ -1337,9 +1352,8 @@ def list_pending_reviews():
     else:
         rows = db.execute(
             'SELECT t.*, u.name AS child_name FROM transactions t JOIN users u ON u.id=t.child_id '
-            'WHERE t.status=? AND t.child_id IN '
-            '(SELECT child_id FROM parent_child WHERE parent_id=?) ORDER BY t.id DESC',
-            ('pending', g.user['id'])).fetchall()
+            'WHERE t.status=? ORDER BY t.id DESC',
+            ('pending',)).fetchall()
     return ok(reviews=[dict(r) for r in rows])
 
 
