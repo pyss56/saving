@@ -540,6 +540,46 @@ class SavingsApiTest(unittest.TestCase):
         r = c.post('/api/children/bind', headers=self.header(px), json={'username': 'Demo'})
         self.assertTrue(r.get_json()['ok'])
 
+    def test_parent_task_custom_times(self):
+        c = self.client
+        p = self.auth('parent1')
+        children = c.get('/api/children', headers=self.header(p)).get_json()['children']
+        child1 = next(x for x in children if x['username'] == 'child1')
+
+        # 家长登记已完成任务，并自定义创建/完成时间（补录历史任务）
+        r = c.post('/api/tasks', headers=self.header(p),
+                   json={'child_id': child1['id'], 'title': '整理书包',
+                         'reward_amount': 3, 'completed': True,
+                         'created_at': '2026-08-01 08:00:00',
+                         'completed_at': '2026-08-01T18:30'})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '整理书包')
+        self.assertEqual(task['status'], 'completed')
+        self.assertEqual(task['created_at'], '2026-08-01 08:00:00')
+        self.assertEqual(task['completed_at'], '2026-08-01 18:30:00')
+
+        # 不传时间时缺省为当前时间（非空且格式正确）
+        r = c.post('/api/tasks', headers=self.header(p),
+                   json={'child_id': child1['id'], 'title': '擦桌子',
+                         'reward_amount': 2, 'completed': True})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '擦桌子')
+        self.assertEqual(task['status'], 'completed')
+        self.assertIsNotNone(task['created_at'])
+        self.assertIsNotNone(task['completed_at'])
+
+        # 非法时间格式回退为当前时间（不报错）
+        r = c.post('/api/tasks', headers=self.header(p),
+                   json={'child_id': child1['id'], 'title': '洗碗',
+                         'reward_amount': 1, 'completed': True,
+                         'created_at': 'not-a-date', 'completed_at': 'xxx'})
+        self.assertTrue(r.get_json()['ok'])
+        tasks = c.get('/api/tasks', headers=self.header(p)).get_json()['tasks']
+        task = next(t for t in tasks if t['title'] == '洗碗')
+        self.assertIsNotNone(task['created_at'])
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')

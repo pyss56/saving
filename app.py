@@ -38,6 +38,22 @@ def now_str():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
+def parse_dt(value, default=None):
+    """解析日期时间字符串为规范 'YYYY-MM-DD HH:MM:SS'。
+    兼容 T 分隔（datetime-local）、仅日期、无秒等格式；解析失败返回 default。"""
+    if not value:
+        return default
+    v = str(value).strip().replace('T', ' ')
+    if len(v) == 10 and v[4] == '-' and v[7] == '-':
+        v += ' 00:00:00'
+    elif len(v) == 16 and v[4] == '-' and v[13] == ':':
+        v += ':00'
+    try:
+        return datetime.datetime.strptime(v, '%Y-%m-%d %H:%M:%S').strftime('%Y-%m-%d %H:%M:%S')
+    except (ValueError, TypeError):
+        return default
+
+
 # ---------------- 数据库 ----------------
 def get_db():
     if 'db' not in g:
@@ -1123,14 +1139,16 @@ def create_task():
         if not child_id or not is_child_of(g.user['id'], int(child_id)):
             return error('请选择已绑定的孩子')
         # 家长可直接登记“已完成”的任务：completed=true 时跳过孩子标记完成，状态直接为 completed
+        # 可自定义创建时间/完成时间（用于补录历史任务），缺省用当前时间
         completed = bool(data.get('completed'))
         status = 'completed' if completed else 'active'
-        completed_at = now_str() if completed else None
+        created_at = parse_dt(data.get('created_at'), now_str())
+        completed_at = parse_dt(data.get('completed_at'), now_str()) if completed else None
         db.execute(
             "INSERT INTO tasks (parent_id, child_id, initiator, template_id, title, description, "
             "reward_amount, status, created_at, approved_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (g.user['id'], int(child_id), 'parent', template_id, title, data.get('description'),
-             reward, status, now_str(), now_str(), completed_at),
+             reward, status, created_at, now_str(), completed_at),
         )
     else:
         # 儿童申请任务：completed=true 表示“已完成”，用 completed_at 做标记，家长审批后直接发奖励

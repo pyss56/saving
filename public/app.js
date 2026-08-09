@@ -18,6 +18,14 @@ const esc = (s) =>
   }[c]));
 const money = (n) => '¥' + Number(n || 0).toFixed(2);
 const fmtDate = (s) => (s ? String(s).slice(5, 16) : '');
+const fmtDT = (s) => (s ? String(s).slice(0, 16) : '');
+/* 任务时间行：创建时间 / 完成时间 */
+const taskTimes = (t) => {
+  const parts = [];
+  if (t.created_at) parts.push(`创建 ${fmtDT(t.created_at)}`);
+  if (t.completed_at) parts.push(`完成 ${fmtDT(t.completed_at)}`);
+  return parts.length ? '<br>' + parts.join(' · ') : '';
+};
 
 /* ---------- 轻提示（替代原生 alert 弹窗） ---------- */
 let __toastTimer = null;
@@ -592,7 +600,7 @@ async function parentTasks() {
       <div class="row-card">
         <div class="row-main">
           <div class="row-title">${esc(t.title)} <span class="tag">${t.initiator === 'parent' ? '家长布置' : '孩子申请'}</span></div>
-          <div class="row-sub">${esc(t.child_name || '')} · ${TASK_STATUS[t.status] || t.status}${t.description ? '<br>' + esc(t.description) : ''}</div>
+          <div class="row-sub">${esc(t.child_name || '')} · ${TASK_STATUS[t.status] || t.status}${taskTimes(t)}${t.description ? '<br>' + esc(t.description) : ''}</div>
         </div>
         <div class="row-amount">${money(t.reward_amount)}</div>
       </div>${action}
@@ -607,7 +615,11 @@ async function parentTasks() {
         <div class="field"><input id="tk-title" placeholder="任务名称（选了模板可留空，用模板名）"></div>
         <div class="field"><input id="tk-reward" type="number" step="0.5" min="0" placeholder="奖励金额(元，留空用模板价)"></div>
         <div class="field"><input id="tk-desc" placeholder="说明(可选)"></div>
-        <div class="field"><label><input id="tk-completed" type="checkbox"> 已完成（孩子已经做完，直接登记）</label></div>
+        <div class="field"><label><input id="tk-completed" type="checkbox" onchange="toggleTkTimes()"> 已完成（孩子已经做完，直接登记）</label></div>
+        <div id="tk-times" style="display:none">
+          <div class="field"><label class="tpl-icon-label">创建时间：</label><input id="tk-created" type="datetime-local"></div>
+          <div class="field"><label class="tpl-icon-label">完成时间：</label><input id="tk-completed-at" type="datetime-local"></div>
+        </div>
         <button class="btn primary btn-block">发布</button>
       </form>
     </div>
@@ -841,7 +853,7 @@ async function childTasks() {
       <div class="row-card">
         <div class="row-main">
           <div class="row-title">${esc(t.title)} <span class="tag">${t.initiator === 'parent' ? '家长布置' : '我申请的'}</span></div>
-          <div class="row-sub">${TASK_STATUS[t.status] || t.status}${t.description ? '<br>' + esc(t.description) : ''}</div>
+          <div class="row-sub">${TASK_STATUS[t.status] || t.status}${taskTimes(t)}${t.description ? '<br>' + esc(t.description) : ''}</div>
         </div>
         <div class="row-amount plus">+${money(t.reward_amount)}</div>
       </div>${action}
@@ -966,18 +978,39 @@ async function deleteTemplate(id) {
   if (!confirm('确定删除该模板吗？')) return;
   try { await api('DELETE', '/templates/' + id); render(); } catch (err) { alert(err.message); }
 }
+function toggleTkTimes() {
+  const checked = document.getElementById('tk-completed') && document.getElementById('tk-completed').checked;
+  const box = document.getElementById('tk-times');
+  if (box) box.style.display = checked ? 'block' : 'none';
+  if (checked) {
+    const now = new Date();
+    const pad = (n) => String(n).padStart(2, '0');
+    const val = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
+    const c = document.getElementById('tk-created');
+    const d = document.getElementById('tk-completed-at');
+    if (c && !c.value) c.value = val;
+    if (d && !d.value) d.value = val;
+  }
+}
 async function createTask(e) {
   e.preventDefault();
   try {
     const rewardVal = document.getElementById('tk-reward').value;
+    const completed = document.getElementById('tk-completed').checked;
     const body = {
       child_id: parseInt(document.getElementById('tk-child').value, 10),
       template_id: document.getElementById('tk-tpl').value || null,
       title: document.getElementById('tk-title').value.trim(),
       reward_amount: rewardVal ? parseFloat(rewardVal) : 0,
       description: document.getElementById('tk-desc').value.trim(),
-      completed: document.getElementById('tk-completed').checked,
+      completed,
     };
+    if (completed) {
+      const c = document.getElementById('tk-created').value;
+      const d = document.getElementById('tk-completed-at').value;
+      if (c) body.created_at = c.replace('T', ' ');
+      if (d) body.completed_at = d.replace('T', ' ');
+    }
     const r = await api('POST', '/tasks', body);
     alert(r.msg); render();
   } catch (err) { alert(err.message); }
