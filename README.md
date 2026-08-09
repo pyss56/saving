@@ -86,6 +86,7 @@ python app.py
 | `PORT` | `8000` | 服务端口 |
 | `DATA_DIR` | `./data` | 数据目录 |
 | `DB_PATH` | `{DATA_DIR}/savings.db` | SQLite 数据库路径 |
+| `TZ` | `Asia/Shanghai` | 全局时区（IANA 名称，如 Asia/Shanghai）；未配置默认东八区 |
 | `INIT_USERNAME` | `parent` | 初始家长用户名 |
 | `INIT_PASSWORD` | `123456` | 初始家长密码（首次登录后请修改） |
 | `SEED_DEMO` | 空 | 设为 `1` 时写入 parent1/child1/child2 演示数据（测试用） |

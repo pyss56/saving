@@ -136,3 +136,9 @@ CREATE TABLE IF NOT EXISTS transactions (
 CREATE INDEX IF NOT EXISTS idx_transactions_child ON transactions (child_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_child ON tasks (child_id);
 CREATE INDEX IF NOT EXISTS idx_goals_child ON goals (child_id);
+
+-- 数据库 schema 版本（版本化迁移记录表：程序启动时按版本递增执行未执行的迁移）
+CREATE TABLE IF NOT EXISTS schema_meta (
+  id      INTEGER PRIMARY KEY CHECK (id = 1),
+  version INTEGER NOT NULL DEFAULT 0
+);

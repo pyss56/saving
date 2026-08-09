@@ -9,6 +9,7 @@ import secrets
 import threading
 import time
 import datetime
+import zoneinfo
 from functools import wraps
 
 from flask import Flask, request, jsonify, g, send_from_directory
@@ -33,9 +34,26 @@ app = Flask(__name__, static_folder=None,
 # 内存 token 存储: token -> {user_id, expires}
 TOKENS = {}
 
+# 时区：统一由环境变量 TZ 控制（如 TZ=Asia/Shanghai）；未配置时默认东八区
+# 系统无 IANA 时区库（如部分 Windows）时回退到固定 UTC+8，保证始终可用
+DEFAULT_TZ = 'Asia/Shanghai'
+TZ_NAME = os.environ.get('TZ', '').strip() or DEFAULT_TZ
+try:
+    TZ = zoneinfo.ZoneInfo(TZ_NAME)
+except Exception:
+    try:
+        TZ = zoneinfo.ZoneInfo(DEFAULT_TZ)
+    except Exception:
+        TZ = datetime.timezone(datetime.timedelta(hours=8), name='UTC+8')
+
+
+def now_dt():
+    """当前时间（带配置时区 TZ 的 aware datetime）"""
+    return datetime.datetime.now(TZ)
+
 
 def now_str():
-    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    return now_dt().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def parse_dt(value, default=None):
@@ -78,20 +96,36 @@ def load_schema():
 def init_db():
     db = sqlite3.connect(DB_PATH)
     db.executescript(load_schema())
-    migrate_db(db)
+    run_migrations(db)
     db.commit()
     db.close()
     seed_if_empty()
 
 
-def migrate_db(db):
-    """轻量迁移：为已存在的数据库补齐新增字段/索引，保证旧库升级后可用。"""
-    def add_col(table, col, ddl):
-        cols = [r[1] for r in db.execute('PRAGMA table_info(%s)' % table).fetchall()]
-        if col not in cols:
-            db.execute('ALTER TABLE %s ADD COLUMN %s' % (table, ddl))
-    add_col('transactions', 'cancelled_at', 'cancelled_at TEXT')
-    add_col('term_deposits', 'settled_at', 'settled_at TEXT')
+def _add_col(db, table, col, ddl):
+    cols = [r[1] for r in db.execute('PRAGMA table_info(%s)' % table).fetchall()]
+    if col not in cols:
+        db.execute('ALTER TABLE %s ADD COLUMN %s' % (table, ddl))
+
+
+# ---------------- 数据库版本化迁移 ----------------
+# 每个版本一个迁移函数：把库从 version-1 升级到 version，函数内需幂等（可重复执行）。
+# 追加新的数据库改动时：
+#   1. 新增一个迁移函数并登记到 MIGRATIONS（版本号递增）；
+#   2. 同步更新 schema.sql 的基础结构（新库直接生成最新结构）；
+#   3. 递增 SCHEMA_VERSION。
+SCHEMA_VERSION = 3
+
+
+def mig_v1_cancelled_at(db):
+    _add_col(db, 'transactions', 'cancelled_at', 'cancelled_at TEXT')
+
+
+def mig_v2_settled_at(db):
+    _add_col(db, 'term_deposits', 'settled_at', 'settled_at TEXT')
+
+
+def mig_v3_username_ci_index(db):
     # 用户名大小写不敏感唯一索引：仅当现库无大小写重复时才建，避免脏数据导致启动失败
     dups = db.execute(
         'SELECT LOWER(username) AS u, COUNT(*) AS c FROM users GROUP BY LOWER(username) HAVING c>1'
@@ -99,7 +133,32 @@ def migrate_db(db):
     if not dups:
         db.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_ci '
                    'ON users (LOWER(username))')
-    db.commit()
+
+
+MIGRATIONS = {
+    1: mig_v1_cancelled_at,
+    2: mig_v2_settled_at,
+    3: mig_v3_username_ci_index,
+}
+
+
+def run_migrations(db):
+    """版本化迁移：程序每次启动执行；按版本递增应用未执行的迁移，记录到 schema_meta。
+
+    已执行过的迁移不会重复执行；迁移函数本身幂等，重复执行也安全。
+    """
+    db.execute('CREATE TABLE IF NOT EXISTS schema_meta '
+               '(id INTEGER PRIMARY KEY CHECK (id=1), version INTEGER NOT NULL DEFAULT 0)')
+    row = db.execute('SELECT version FROM schema_meta WHERE id=1').fetchone()
+    current = row['version'] if row else 0
+    if not row:
+        db.execute('INSERT INTO schema_meta (id, version) VALUES (1, 0)')
+        db.commit()
+    for version in sorted(MIGRATIONS):
+        if version > current:
+            MIGRATIONS[version](db)
+            db.execute('UPDATE schema_meta SET version=? WHERE id=1', (version,))
+            db.commit()
 
 
 def reset_db():
@@ -625,7 +684,7 @@ def create_term_deposit():
         return error('活期余额不足')
     rate = term_rate_for_days(db, g.user['id'], term_days)
     start = now_str()
-    mature = (datetime.datetime.now() + datetime.timedelta(days=term_days)).strftime('%Y-%m-%d %H:%M:%S')
+    mature = (now_dt() + datetime.timedelta(days=term_days)).strftime('%Y-%m-%d %H:%M:%S')
     new_balance = round(float(acc['balance']) - amount, 2)
     db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
     db.execute(
@@ -913,8 +972,8 @@ def settle_single_deposit(db, d):
         interest = round(amount * rate * term_days / 365, 2)
         early = False
     else:
-        start = datetime.datetime.strptime(d['start_at'], '%Y-%m-%d %H:%M:%S')
-        elapsed_days = max(0.0, (datetime.datetime.now() - start).total_seconds() / 86400.0)
+        start = datetime.datetime.strptime(d['start_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=TZ)
+        elapsed_days = max(0.0, (now_dt() - start).total_seconds() / 86400.0)
         term_portion = min(1.0, elapsed_days / term_days)
         demand_rate = float(acc['interest_rate']) if acc else 0.02
         blended = rate * term_portion + demand_rate * (1 - term_portion)
@@ -1426,7 +1485,7 @@ def static_files(path):
 # ---------------- 定期利息线程 ----------------
 def interest_worker():
     while True:
-        now = datetime.datetime.now()
+        now = now_dt()
         next_run = (now + datetime.timedelta(days=1)).replace(hour=0, minute=5, second=0, microsecond=0)
         time.sleep(max(1, (next_run - now).total_seconds()))
         try:

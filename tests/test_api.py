@@ -580,6 +580,31 @@ class SavingsApiTest(unittest.TestCase):
         task = next(t for t in tasks if t['title'] == '洗碗')
         self.assertIsNotNone(task['created_at'])
 
+    def test_schema_migrations(self):
+        import sqlite3
+        db = sqlite3.connect(appmod.DB_PATH)
+        row = db.execute('SELECT version FROM schema_meta WHERE id=1').fetchone()
+        db.close()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], appmod.SCHEMA_VERSION)
+
+        # 重复初始化不报错（迁移幂等，且不重复应用）
+        appmod.reset_db()
+        db = sqlite3.connect(appmod.DB_PATH)
+        row = db.execute('SELECT version FROM schema_meta WHERE id=1').fetchone()
+        db.close()
+        self.assertEqual(row[0], appmod.SCHEMA_VERSION)
+
+    def test_timezone_default(self):
+        import re
+        # 未配置 TZ 时默认东八区（UTC+8）；now_str 输出规范格式
+        s = appmod.now_str()
+        self.assertIsNotNone(re.match(r'^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$', s))
+        self.assertIsNotNone(appmod.TZ)
+        offset = appmod.now_dt().utcoffset()
+        self.assertIsNotNone(offset)
+        self.assertEqual(offset.total_seconds() / 3600, 8.0)
+
     def test_change_password(self):
         c = self.client
         token = self.auth('child1')
