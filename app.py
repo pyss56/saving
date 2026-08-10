@@ -95,6 +95,7 @@ def load_schema():
 
 def init_db():
     db = sqlite3.connect(DB_PATH)
+    db.row_factory = sqlite3.Row
     db.executescript(load_schema())
     run_migrations(db)
     db.commit()
