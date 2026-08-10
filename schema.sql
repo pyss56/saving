@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS term_tiers (
 );
 
 -- 定期存款：活期转定期锁定，到期返还本金并结算定期利息；也可提前结清（未到期部分按活期折算）
--- status: active=存期中, matured=已结算(到期或提前结清)；settled_at 非空表示提前结清
+-- status: active=存期中, matured=已结算(到期或提前结清), pending_in=待家长确认转入,
+--         pending_out=待家长审核结清, rejected=转入被驳回；settled_at 非空表示提前结清
 CREATE TABLE IF NOT EXISTS term_deposits (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   child_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -64,7 +65,8 @@ CREATE TABLE IF NOT EXISTS term_deposits (
   term_days  INTEGER NOT NULL,
   start_at   TEXT    NOT NULL,
   mature_at  TEXT    NOT NULL,
-  status     TEXT    NOT NULL DEFAULT 'active' CHECK (status IN ('active','matured')),
+  status     TEXT    NOT NULL DEFAULT 'active'
+             CHECK (status IN ('active','matured','pending_in','pending_out','rejected')),
   settled_at TEXT
 );
 
@@ -114,13 +116,16 @@ CREATE TABLE IF NOT EXISTS goals (
 
 -- 资金流水：所有存钱/支出/奖励/利息/惩罚均形成记录
 -- type: task_reward 任务奖励, punish 惩罚扣款, save 存钱, withdraw 取钱,
---       consume 消费, interest 利息, parent_deposit 家长存入
+--       consume 消费, interest 利息, parent_deposit 家长存入,
+--       term_in 转存定期, term_out/term_interest 定期到期, term_early_out/term_early_interest 提前结清
 -- amount 正数=收入, 负数=支出; status: pending=待家长审核, approved=已入账, rejected=已驳回/已取消
+-- deposit_id 非空表示该笔是定期转入/转出申请，关联对应存单（定期审核联动存单状态用）
 CREATE TABLE IF NOT EXISTS transactions (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,
   child_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   account_id      INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
   goal_id         INTEGER REFERENCES goals(id) ON DELETE SET NULL,
+  deposit_id      INTEGER REFERENCES term_deposits(id) ON DELETE SET NULL,
   type            TEXT    NOT NULL,
   amount          REAL    NOT NULL,
   balance_after   REAL,

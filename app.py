@@ -115,7 +115,7 @@ def _add_col(db, table, col, ddl):
 #   1. 新增一个迁移函数并登记到 MIGRATIONS（版本号递增）；
 #   2. 同步更新 schema.sql 的基础结构（新库直接生成最新结构）；
 #   3. 递增 SCHEMA_VERSION。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def mig_v1_cancelled_at(db):
@@ -136,10 +136,40 @@ def mig_v3_username_ci_index(db):
                    'ON users (LOWER(username))')
 
 
+def mig_v4_term_review(db):
+    """v4：定期转入/转出需家长审核。
+    - term_deposits 重建表，扩展 status 允许 pending_in / pending_out / rejected
+      （SQLite 无法改 CHECK 约束，只能重建表；数据原样搬移）；
+    - transactions 新增 deposit_id 列，审核定期单据时用于定位对应存单。
+    """
+    sql = db.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='term_deposits'").fetchone()
+    if sql and "'pending_in'" not in (sql[0] or ''):
+        db.execute('ALTER TABLE term_deposits RENAME TO term_deposits_old')
+        db.execute(
+            'CREATE TABLE term_deposits ('
+            '  id INTEGER PRIMARY KEY AUTOINCREMENT,'
+            '  child_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,'
+            '  account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,'
+            '  amount REAL NOT NULL, rate REAL NOT NULL, term_days INTEGER NOT NULL,'
+            '  start_at TEXT NOT NULL, mature_at TEXT NOT NULL,'
+            "  status TEXT NOT NULL DEFAULT 'active'"
+            " CHECK (status IN ('active','matured','pending_in','pending_out','rejected')),"
+            '  settled_at TEXT)')
+        db.execute(
+            'INSERT INTO term_deposits (id, child_id, account_id, amount, rate, term_days, '
+            'start_at, mature_at, status, settled_at) '
+            'SELECT id, child_id, account_id, amount, rate, term_days, start_at, mature_at, '
+            'status, settled_at FROM term_deposits_old')
+        db.execute('DROP TABLE term_deposits_old')
+    _add_col(db, 'transactions', 'deposit_id',
+             'deposit_id INTEGER REFERENCES term_deposits(id) ON DELETE SET NULL')
+
+
 MIGRATIONS = {
     1: mig_v1_cancelled_at,
     2: mig_v2_settled_at,
     3: mig_v3_username_ci_index,
+    4: mig_v4_term_review,
 }
 
 
@@ -323,6 +353,10 @@ def review_pending_tx(db, tx_id, parent_id, action):
     tx = db.execute('SELECT * FROM transactions WHERE id=?', (tx_id,)).fetchone()
     if not tx:
         raise ValueError('该单据不存在')
+    # 定期转入/转出走专门审核逻辑（本金/利息/存单状态联动）
+    if tx['deposit_id'] and tx['type'] in ('term_in', 'term_out', 'term_early_out'):
+        _review_term_tx(db, tx, parent_id, action)
+        return
     # 非多租户：任何家长都可以审批任何孩子的存取/消费申请
     if action == 'approve':
         acc = get_account(db, tx['child_id'])
@@ -357,6 +391,105 @@ def review_pending_tx(db, tx_id, parent_id, action):
             db.rollback()
             raise ValueError('该单据已被处理，无法重复审核')
     db.commit()
+
+
+def _revert_term_deposit(db, tx):
+    """驳回/取消定期申请时还原存单状态：转入驳回→rejected；结清驳回→恢复 active。"""
+    if tx['type'] == 'term_in':
+        db.execute("UPDATE term_deposits SET status='rejected' WHERE id=? AND status='pending_in'",
+                   (tx['deposit_id'],))
+    else:
+        db.execute("UPDATE term_deposits SET status='active' WHERE id=? AND status='pending_out'",
+                   (tx['deposit_id'],))
+
+
+def _review_term_tx(db, tx, parent_id, action):
+    """家长审核定期转入/转出申请（并发安全，原子占位）。
+
+    - term_in 通过：从活期扣款，存单置 active；驳回：存单置 rejected（款未动）。
+    - term_out/term_early_out 通过：返还本金+利息到活期，存单置 matured；
+      驳回：存单恢复 active（款仍锁定在定期）。
+    """
+    now = now_str()
+    d = db.execute('SELECT * FROM term_deposits WHERE id=?', (tx['deposit_id'],)).fetchone()
+    acc = get_account(db, tx['child_id'])
+    if tx['type'] == 'term_in':
+        if action == 'approve':
+            if not d or d['status'] != 'pending_in':
+                raise ValueError('该转存申请状态异常，无法审核')
+            amount = float(tx['amount'])  # 负数：活期扣款
+            if float(acc['balance']) < -amount:
+                raise ValueError('活期余额不足，无法通过该转存')
+            new_balance = round(float(acc['balance']) + amount, 2)
+            cur = db.execute(
+                "UPDATE transactions SET status='approved', balance_after=?, reviewed_by=?, "
+                "reviewed_at=? WHERE id=? AND status='pending'",
+                (new_balance, parent_id, now, tx['id']))
+            if cur.rowcount != 1:
+                db.rollback()
+                raise ValueError('该单据已被处理，无法重复审核')
+            db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
+            db.execute("UPDATE term_deposits SET status='active' WHERE id=? AND status='pending_in'",
+                       (d['id'],))
+            db.commit()
+            return
+        _reject_pending_term(db, tx, parent_id, now)
+        _revert_term_deposit(db, tx)
+        db.commit()
+        return
+    # term_out / term_early_out
+    if action == 'approve':
+        if not d or d['status'] != 'pending_out':
+            raise ValueError('该结清申请状态异常，无法审核')
+        amount = float(d['amount'])
+        term_days = int(d['term_days'])
+        rate = float(d['rate'])
+        if now >= d['mature_at']:
+            interest = round(amount * rate * term_days / 365, 2)
+            early = False
+        else:
+            start = datetime.datetime.strptime(d['start_at'], '%Y-%m-%d %H:%M:%S').replace(tzinfo=TZ)
+            elapsed_days = max(0.0, (now_dt() - start).total_seconds() / 86400.0)
+            term_portion = min(1.0, elapsed_days / term_days)
+            demand_rate = float(acc['interest_rate'])
+            blended = rate * term_portion + demand_rate * (1 - term_portion)
+            interest = round(amount * blended * elapsed_days / 365, 2)
+            early = True
+        total = round(amount + interest, 2)
+        new_balance = round(float(acc['balance']) + total, 2)
+        cur = db.execute(
+            "UPDATE transactions SET status='approved', balance_after=?, reviewed_by=?, "
+            "reviewed_at=? WHERE id=? AND status='pending'",
+            (new_balance, parent_id, now, tx['id']))
+        if cur.rowcount != 1:
+            db.rollback()
+            raise ValueError('该单据已被处理，无法重复审核')
+        db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
+        db.execute("UPDATE term_deposits SET status='matured', settled_at=? "
+                   "WHERE id=? AND status='pending_out'", (now if early else None, d['id']))
+        # 补记利息流水（本金流水即原申请单）
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, "
+            "description, status, reviewed_by, reviewed_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'],
+             'term_early_interest' if early else 'term_interest', interest, new_balance,
+             '提前结清利息（未到期部分按活期折算）' if early else '定期利息',
+             'approved', parent_id, now, now))
+        db.commit()
+        return
+    _reject_pending_term(db, tx, parent_id, now)
+    _revert_term_deposit(db, tx)
+    db.commit()
+
+
+def _reject_pending_term(db, tx, parent_id, now):
+    """定期申请驳回：原子置 rejected，失败抛错（与并发审核/取消互斥）。"""
+    cur = db.execute(
+        "UPDATE transactions SET status='rejected', reviewed_by=?, reviewed_at=? "
+        "WHERE id=? AND status='pending'", (parent_id, now, tx['id']))
+    if cur.rowcount != 1:
+        db.rollback()
+        raise ValueError('该单据已被处理，无法重复审核')
 
 
 # ---------------- 认证 ----------------
@@ -517,7 +650,9 @@ def account_payload(db, child_id):
     deposits = [dict(r) for r in db.execute(
         'SELECT * FROM term_deposits WHERE child_id=? ORDER BY id DESC',
         (child_id,)).fetchall()]
-    term_balance = round(sum(float(d['amount']) for d in deposits if d['status'] == 'active'), 2)
+    # 定期合计：存期中 + 待审核结清（款项仍锁定在定期）；待确认转入（pending_in）未入账不计入
+    term_balance = round(sum(float(d['amount'])
+                             for d in deposits if d['status'] in ('active', 'pending_out')), 2)
     pending_deposit, pending_withdraw = pending_amounts(db, child_id)
     available = round(float(acc['balance']) - pending_withdraw, 2)
     return {'id': acc['id'], 'child_id': acc['child_id'],
@@ -669,6 +804,8 @@ def set_term_tiers_api(child_id):
 @app.route('/api/term-deposits', methods=['POST'])
 @require_child
 def create_term_deposit():
+    """儿童申请转存定期：不立即扣款，生成待家长审核单（金额从可用余额冻结），
+    家长确认后才会从活期扣款并把存单置为 active。"""
     data = request.get_json(silent=True) or {}
     try:
         amount = round(float(data.get('amount') or 0), 2)
@@ -681,24 +818,25 @@ def create_term_deposit():
         return error('存期至少 1 天')
     db = get_db()
     acc = get_account(db, g.user['id'])
-    if float(acc['balance']) < amount:
-        return error('活期余额不足')
+    _, pending_withdraw = pending_amounts(db, g.user['id'])
+    available = round(float(acc['balance']) - pending_withdraw, 2)
+    if amount > available:
+        return error('可用余额不足（待审核已冻结 %s 元，可用 %s 元）'
+                     % (fmt_money(pending_withdraw), fmt_money(available)))
     rate = term_rate_for_days(db, g.user['id'], term_days)
     start = now_str()
     mature = (now_dt() + datetime.timedelta(days=term_days)).strftime('%Y-%m-%d %H:%M:%S')
-    new_balance = round(float(acc['balance']) - amount, 2)
-    db.execute('UPDATE accounts SET balance=? WHERE id=?', (new_balance, acc['id']))
-    db.execute(
+    dep_id = db.execute(
         'INSERT INTO term_deposits (child_id, account_id, amount, rate, term_days, start_at, '
-        'mature_at, status) VALUES (?,?,?,?,?,?,?,?)',
-        (g.user['id'], acc['id'], amount, rate, term_days, start, mature, 'active'))
+        "mature_at, status) VALUES (?,?,?,?,?,?,?, 'pending_in')",
+        (g.user['id'], acc['id'], amount, rate, term_days, start, mature)).lastrowid
     db.execute(
-        "INSERT INTO transactions (child_id, account_id, type, amount, balance_after, description, "
-        "status, created_at) VALUES (?,?,?,?,?,?,?,?)",
-        (g.user['id'], acc['id'], 'term_in', -amount, new_balance,
-         f'转存定期 {term_days} 天（年利率 {rate*100:.1f}%）', 'approved', start))
+        "INSERT INTO transactions (child_id, account_id, deposit_id, type, amount, balance_after, "
+        "description, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (g.user['id'], acc['id'], dep_id, 'term_in', -amount, None,
+         f'转存定期 {term_days} 天（年利率 {rate*100:.1f}%）', 'pending', start))
     db.commit()
-    return ok(msg=f'已转存定期 {term_days} 天，年利率 {rate*100:.1f}%，到期自动还本付息',
+    return ok(msg=f'已提交转存定期申请（{term_days} 天，年利率 {rate*100:.1f}%），等待家长确认后入账',
               rate=rate, mature_at=mature)
 
 
@@ -720,20 +858,43 @@ def list_term_deposits():
 @app.route('/api/term-deposits/settle', methods=['POST'])
 @require_auth
 def settle_term_deposits():
+    """结算所有已到期的定期：家长直接结算；儿童则逐笔提交家长审核。"""
     db = get_db()
-    child_id = g.user['id'] if g.user['role'] == 'child' else None
-    count, interest = mature_due_deposits(db, child_id)
+    if g.user['role'] == 'parent':
+        # 家长直接结算（家长即审核方，无需二次审核）
+        count, interest = mature_due_deposits(db)
+        db.commit()
+        if count:
+            return ok(msg=f'已结算 {count} 笔到期定期，利息 {interest:.2f} 元',
+                      count=count, interest=round(interest, 2))
+        return ok(msg='没有到期的定期存款', count=0)
+    # 儿童：把已到期存单逐个提交家长审核
+    now = now_str()
+    deps = db.execute(
+        "SELECT * FROM term_deposits WHERE child_id=? AND status='active' AND mature_at <= ?",
+        (g.user['id'], now)).fetchall()
+    n = 0
+    for d in deps:
+        cur = db.execute(
+            "UPDATE term_deposits SET status='pending_out' WHERE id=? AND status='active'", (d['id'],))
+        if cur.rowcount != 1:
+            continue
+        db.execute(
+            "INSERT INTO transactions (child_id, account_id, deposit_id, type, amount, balance_after, "
+            "description, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (d['child_id'], d['account_id'], d['id'], 'term_out', d['amount'], None,
+             '定期到期·本金返还（待家长审核）', 'pending', now_str()))
+        n += 1
     db.commit()
-    if count:
-        return ok(msg=f'已结算 {count} 笔到期定期，利息 {interest:.2f} 元',
-                  count=count, interest=round(interest, 2))
+    if n:
+        return ok(msg=f'已提交 {n} 笔到期定期结清申请，等待家长审核', count=n)
     return ok(msg='没有到期的定期存款', count=0)
 
 
 @app.route('/api/term-deposits/<int:deposit_id>/settle', methods=['POST'])
 @require_auth
 def settle_one_term_deposit(deposit_id):
-    """结算单笔定期存单：到期正常结算；未到期可提前结清（利息按定期/活期折算）。"""
+    """结算单笔定期存单：家长直接结算；儿童提交申请走家长审核。"""
     db = get_db()
     d = db.execute('SELECT * FROM term_deposits WHERE id=?', (deposit_id,)).fetchone()
     if not d:
@@ -744,14 +905,30 @@ def settle_one_term_deposit(deposit_id):
     elif not is_child_of(g.user['id'], d['child_id']):
         return error('无权操作')
     if d['status'] != 'active':
-        return error('该存单已结算，不能重复结清')
-    interest, early = settle_single_deposit(db, d)
+        return error('该存单不可结清（可能已在审核中或已结算）')
+    if g.user['role'] == 'parent':
+        # 家长直接结清（家长即审核方，无需二次审核）
+        interest, early = settle_single_deposit(db, d)
+        db.commit()
+        if early:
+            return ok(msg=f'已提前结清存单 #{deposit_id}，利息 {interest:.2f} 元（未到期部分按活期折算）',
+                      interest=round(interest, 2), early=True)
+        return ok(msg=f'已结算存单 #{deposit_id}，利息 {interest:.2f} 元',
+                  interest=round(interest, 2), early=False)
+    # 儿童申请结清 → 提交家长审核（存单置 pending_out，金额仍锁定在定期）
+    matured = now_str() >= d['mature_at']
+    ttype = 'term_out' if matured else 'term_early_out'
+    desc = '定期到期·本金返还（待家长审核）' if matured else '定期提前结清·本金返还（待家长审核）'
+    cur = db.execute(
+        "UPDATE term_deposits SET status='pending_out' WHERE id=? AND status='active'", (d['id'],))
+    if cur.rowcount != 1:
+        return error('该存单状态已变化，无法申请结清')
+    db.execute(
+        "INSERT INTO transactions (child_id, account_id, deposit_id, type, amount, balance_after, "
+        "description, status, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+        (d['child_id'], d['account_id'], d['id'], ttype, d['amount'], None, desc, 'pending', now_str()))
     db.commit()
-    if early:
-        return ok(msg=f'已提前结清存单 #{deposit_id}，利息 {interest:.2f} 元（未到期部分按活期折算）',
-                  interest=round(interest, 2), early=True)
-    return ok(msg=f'已结算存单 #{deposit_id}，利息 {interest:.2f} 元',
-              interest=round(interest, 2), early=False)
+    return ok(msg='已提交结清申请，等待家长审核后返还本金和利息', early=not matured)
 
 
 # ---------------- 家长-孩子绑定 ----------------
@@ -1464,9 +1641,12 @@ def cancel_transaction(tx_id):
     cur = db.execute(
         "UPDATE transactions SET status='rejected', cancelled_at=?, reviewed_at=? "
         "WHERE id=? AND status='pending'", (now_str(), now_str(), tx_id))
-    db.commit()
     if cur.rowcount != 1:
+        db.commit()
         return error('该单据已被处理，无法取消')
+    if tx['deposit_id'] and tx['type'] in ('term_in', 'term_out', 'term_early_out'):
+        _revert_term_deposit(db, tx)
+    db.commit()
     return ok(msg='已取消该申请')
 
 

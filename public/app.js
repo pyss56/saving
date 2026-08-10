@@ -342,7 +342,7 @@ async function parentChildAccount(childId) {
     <div class="card" style="display:flex;align-items:center;justify-content:space-between;gap:10px">
       <div class="row-main">
         <div class="row-title">⏳ ${pending.length} 笔待审核申请</div>
-        <div class="row-sub">存钱 / 取钱 / 消费，统一在「审核」页处理</div>
+        <div class="row-sub">存钱 / 取钱 / 消费 / 定期存取，统一在「审核」页处理</div>
       </div>
       <button class="btn ok" onclick="setTab('reviews')">去审核</button>
     </div>` : '';
@@ -359,7 +359,7 @@ async function parentChildAccount(childId) {
 
   const deposits = acc.term_deposits || [];
   const activeDeposits = deposits.filter((d) => d.status === 'active');
-  const depositList = deposits.length ? deposits.map(depositCard).join('') : '<div class="empty">没有定期存单</div>';
+  const depositList = deposits.length ? deposits.map((d) => depositCard(d, true)).join('') : '<div class="empty">没有定期存单</div>';
 
   const txList = (txs.length ? txs.slice(0, 30).map(txItem).join('') : '<div class="empty">暂无流水记录</div>');
 
@@ -628,6 +628,11 @@ async function parentTasks() {
 
 async function parentReviews() {
   const r = await api('GET', '/reviews');
+  const approveLabel = (t) => {
+    if (t.type === 'term_in') return '确认转存';
+    if (t.type === 'term_out' || t.type === 'term_early_out') return '确认结清';
+    return Number(t.amount) >= 0 ? '确认入账' : '通过';
+  };
   const list = r.reviews.map((t) => `
     <div class="card">
       <div class="row-card">
@@ -639,11 +644,11 @@ async function parentReviews() {
         <div class="row-amount ${Number(t.amount) >= 0 ? 'plus' : 'minus'}">${Number(t.amount) >= 0 ? '+' : '-'}${money(Math.abs(t.amount))}</div>
       </div>
       <div class="btn-row">
-        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">${Number(t.amount) >= 0 ? '确认入账' : '通过'}</button>
+        <button class="btn ok" onclick="reviewTx(${t.id},'approve')">${approveLabel(t)}</button>
         <button class="btn" onclick="reviewTx(${t.id},'reject')">驳回</button>
       </div>
     </div>`).join('');
-  return `<h3 class="sec-title">待审核项目（存钱 / 取钱 / 消费）</h3>${list || '<div class="empty">暂无待审核项目 🎉</div>'}`;
+  return `<h3 class="sec-title">待审核项目（存钱 / 取钱 / 消费 / 定期存取）</h3>${list || '<div class="empty">暂无待审核项目 🎉</div>'}`;
 }
 
 /* ================= 儿童端 ================= */
@@ -716,22 +721,27 @@ async function childOverview() {
 
 const isMatured = (d) => new Date(String(d.mature_at).replace(' ', 'T')) <= new Date();
 
-/* 定期存单卡片：独立展示存单信息（开立/到期时间、金额、期限、利率、状态），可结清 */
-const depositCard = (d) => {
-  const active = d.status === 'active';
+/* 定期存单卡片：独立展示存单信息（开立/到期时间、金额、期限、利率、状态）
+   isParent=true 家长可直接结算；false（儿童端）结算走家长审核 */
+const depositCard = (d, isParent = false) => {
   const matured = isMatured(d);
   let statusTag = '';
-  if (!active) {
-    statusTag = d.settled_at
-      ? '<span class="tag">已提前结清</span>'
-      : '<span class="tag">已到期</span>';
-  } else if (matured) {
-    statusTag = '<span class="tag pending">已到期可结算</span>';
+  let btn = '';
+  if (d.status === 'active') {
+    if (matured) statusTag = '<span class="tag pending">已到期可结算</span>';
+    const label = matured ? (isParent ? '结算到期' : '申请结算') : (isParent ? '提前结清' : '申请结清');
+    btn = `<div class="btn-row" style="margin-top:8px">
+        <button class="btn ok" onclick="settleTermDeposit(${d.id})">${label}</button>
+      </div>`;
+  } else if (d.status === 'pending_in') {
+    statusTag = '<span class="tag pending">待家长确认</span>';
+  } else if (d.status === 'pending_out') {
+    statusTag = '<span class="tag pending">待家长审核结清</span>';
+  } else if (d.status === 'rejected') {
+    statusTag = '<span class="tag">已驳回</span>';
+  } else {
+    statusTag = d.settled_at ? '<span class="tag">已提前结清</span>' : '<span class="tag">已到期</span>';
   }
-  const btn = active
-    ? `<div class="btn-row" style="margin-top:8px">
-        <button class="btn ok" onclick="settleTermDeposit(${d.id})">${matured ? '结算到期' : '提前结清'}</button>
-      </div>` : '';
   return `
     <div class="card">
       <div class="row-card">
@@ -781,20 +791,21 @@ async function childMoney() {
       </form>
     </div>
     <div class="card">
-      <h3>🏦 定期存款（可提前结清，未到期部分按活期利率折算）</h3>
+      <h3>🏦 定期存款（转入 / 结清均需家长确认）</h3>
       <form onsubmit="createTermDeposit(event)" class="vform">
         <div class="field"><div class="field-row">
           <input id="td-amount" type="number" step="0.5" min="0.5" placeholder="转存金额(元)" required>
           <select id="td-days">${dayOptions}</select>
         </div></div>
-        <button class="btn primary btn-block">转存定期</button>
+        <button class="btn primary btn-block">申请转存定期</button>
       </form>
+      <p class="hint">提交后金额从可用余额冻结，家长确认后入账；提前结清未到期部分按活期利率折算。</p>
     </div>
     <h3 class="sec-title">我的定期存单</h3>
-    ${deposits.length ? deposits.map(depositCard).join('')
+    ${deposits.length ? deposits.map((d) => depositCard(d, false)).join('')
       : '<div class="empty">还没有定期存单，把暂时用不到的钱转成定期吧</div>'}
     ${deposits.some((d) => d.status === 'active' && isMatured(d))
-      ? '<div class="btn-row"><button class="btn ok" onclick="settleTerm()">结算全部到期定期</button></div>' : ''}
+      ? '<div class="btn-row"><button class="btn ok" onclick="settleTerm()">申请结算全部到期定期</button></div>' : ''}
     <div class="card">
       <h3>🏦 取钱（需家长审核）</h3>
       <form onsubmit="takeMoney(event,'withdraw')" class="vform">

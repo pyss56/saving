@@ -241,16 +241,29 @@ class SavingsApiTest(unittest.TestCase):
                   json={'tiers': [{'min_days': 1, 'rate': 0.5}, {'min_days': 30, 'rate': 1.0}]})
         self.assertTrue(r.get_json()['ok'])
 
-        # 活期 20 → 转存 10 元定期 30 天（利率应取 100%）
+        # 儿童申请转存 10 元定期 30 天（利率应取 100%）→ 待家长确认，活期暂不扣款（金额冻结）
         r = c.post('/api/term-deposits', headers=self.header(ch),
                    json={'amount': 10, 'term_days': 30})
         self.assertTrue(r.get_json()['ok'])
         self.assertAlmostEqual(r.get_json()['rate'], 1.0, places=3)
         acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20.0, places=2)          # 未扣款
+        self.assertAlmostEqual(acc['available_balance'], 10.0, places=2)  # 冻结 10
+        self.assertAlmostEqual(acc['term_balance'], 0.0, places=2)      # 未入账不计定期
+
+        # 家长确认转存 → 扣款并入定期
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.patch('/api/transactions/%d/review' % tin['id'],
+                    headers=self.header(p), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
         self.assertAlmostEqual(acc['balance'], 10.0, places=2)      # 活期减少
         self.assertAlmostEqual(acc['term_balance'], 10.0, places=2)  # 定期增加
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        self.assertEqual(deps[0]['status'], 'active')
 
-        # 把到期时间改到过去，模拟到期后结算
+        # 把到期时间改到过去，模拟到期后申请结算 → 待家长审核，款项仍锁定在定期
         import sqlite3
         db = sqlite3.connect(appmod.DB_PATH)
         db.execute("UPDATE term_deposits SET mature_at='2000-01-01 00:00:00' WHERE status='active'")
@@ -260,6 +273,15 @@ class SavingsApiTest(unittest.TestCase):
         r = c.post('/api/term-deposits/settle', headers=self.header(ch), json={})
         self.assertTrue(r.get_json()['ok'])
         self.assertEqual(r.get_json()['count'], 1)
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 10.0, places=2)       # 审核前未到账
+        self.assertAlmostEqual(acc['term_balance'], 10.0, places=2)  # 仍锁定
+
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tout = next(t for t in reviews if t['type'] == 'term_out')
+        r = c.patch('/api/transactions/%d/review' % tout['id'],
+                    headers=self.header(p), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
 
         # 本金+利息回活期：10 + 10*100%*30/365 ≈ 20.82
         acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
@@ -409,9 +431,25 @@ class SavingsApiTest(unittest.TestCase):
         children = c.get('/api/children', headers=self.header(p)).get_json()['children']
         child1 = next(x for x in children if x['username'] == 'child1')
 
-        # 活期 20 → 转存 10 元定期：活期余额剩 10，定期 10
+        # 儿童申请转存 10 元定期：申请期间金额冻结（活期余额未扣，可用余额减 10）
         r = c.post('/api/term-deposits', headers=self.header(ch),
                    json={'amount': 10, 'term_days': 7})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20, places=2)
+        self.assertAlmostEqual(acc['available_balance'], 10, places=2)
+        self.assertAlmostEqual(acc['pending_withdraw'], 10, places=2)
+
+        # 申请待审核期间无法再动用这 10 元
+        r = c.post('/api/transactions', headers=self.header(ch),
+                   json={'type': 'withdraw', 'amount': 15})
+        self.assertEqual(r.status_code, 400)
+
+        # 家长确认转存 → 定期生效
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.patch('/api/transactions/%d/review' % tin['id'],
+                    headers=self.header(p), json={'action': 'approve'})
         self.assertTrue(r.get_json()['ok'])
         acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
         self.assertAlmostEqual(acc['balance'], 10, places=2)
@@ -440,9 +478,14 @@ class SavingsApiTest(unittest.TestCase):
                   json={'tiers': [{'min_days': 1, 'rate': 0.5}, {'min_days': 30, 'rate': 1.0}]})
         self.assertTrue(r.get_json()['ok'])
 
-        # 活期 20 → 转存 10 元定期 30 天
+        # 活期 20 → 申请转存 10 元定期 30 天，家长确认入账
         r = c.post('/api/term-deposits', headers=self.header(ch),
                    json={'amount': 10, 'term_days': 30})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.patch('/api/transactions/%d/review' % tin['id'],
+                    headers=self.header(p), json={'action': 'approve'})
         self.assertTrue(r.get_json()['ok'])
 
         # 把开立时间改到 10 天前，模拟已存 10 天（term_portion = 10/30）
@@ -454,17 +497,24 @@ class SavingsApiTest(unittest.TestCase):
         db.commit()
         db.close()
 
-        # 提前结清
+        # 儿童申请提前结清 → 待家长审核，款项未动
         dep = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits'][0]
         r = c.post('/api/term-deposits/%d/settle' % dep['id'], headers=self.header(ch), json={})
         self.assertTrue(r.get_json()['ok'])
         self.assertTrue(r.get_json()['early'])
-        interest = r.get_json()['interest']
-        self.assertGreater(interest, 0)
-
-        # 本金+利息回活期：活期 10 + 10 + 利息 = 20 + 利息；定期归零
         acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
-        self.assertAlmostEqual(acc['balance'], round(20 + interest, 2), places=2)
+        self.assertAlmostEqual(acc['balance'], 10.0, places=2)   # 审核前未到账
+        self.assertAlmostEqual(acc['term_balance'], 10.0, places=2)
+
+        # 家长确认结清 → 本金+利息回活期（利息在审核时按已存天数折算）
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tout = next(t for t in reviews if t['type'] == 'term_early_out')
+        r = c.patch('/api/transactions/%d/review' % tout['id'],
+                    headers=self.header(p), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        interest = round(acc['balance'] - 20.0, 2)
+        self.assertGreater(interest, 0)
         self.assertAlmostEqual(acc['term_balance'], 0.0, places=2)
 
         # 存单标记提前结清，不能重复结清
@@ -480,13 +530,84 @@ class SavingsApiTest(unittest.TestCase):
         self.assertIn('term_early_out', types)
         self.assertIn('term_early_interest', types)
 
-        # 家长也可为孩子结清（新建一笔再提前结清）
+        # 家长也可直接为孩子结清（家长即审核方，新建一笔确认入账后再提前结清）
         r = c.post('/api/term-deposits', headers=self.header(ch),
                    json={'amount': 5, 'term_days': 30})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin2 = next(t for t in reviews if t['type'] == 'term_in' and t['id'] != tin['id'])
+        r = c.patch('/api/transactions/%d/review' % tin2['id'],
+                    headers=self.header(p), json={'action': 'approve'})
         self.assertTrue(r.get_json()['ok'])
         dep2 = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits'][0]
         r = c.post('/api/term-deposits/%d/settle' % dep2['id'], headers=self.header(p), json={})
         self.assertTrue(r.get_json()['ok'])
+
+    def test_term_review_reject_and_cancel(self):
+        c = self.client
+        p = self.auth('parent1')
+        ch = self.auth('child1')
+
+        # 申请金额超过可用余额（20）应拒绝
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 25, 'term_days': 7})
+        self.assertEqual(r.status_code, 400)
+        # 申请 10 后再申请 15：可用只剩 10，应拒绝（转存申请冻结可用余额）
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 7})
+        self.assertTrue(r.get_json()['ok'])
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 15, 'term_days': 7})
+        self.assertEqual(r.status_code, 400)
+
+        # 家长驳回转存 → 存单 rejected，冻结解除，余额不变
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.patch('/api/transactions/%d/review' % tin['id'],
+                    headers=self.header(p), json={'action': 'reject'})
+        self.assertTrue(r.get_json()['ok'])
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        self.assertEqual(deps[0]['status'], 'rejected')
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 20.0, places=2)
+        self.assertAlmostEqual(acc['available_balance'], 20.0, places=2)
+
+        # 儿童取消转存申请 → 存单 rejected、冻结解除
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 7})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin2 = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.post('/api/transactions/%d/cancel' % tin2['id'], headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        self.assertEqual(deps[0]['status'], 'rejected')
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['available_balance'], 20.0, places=2)
+
+        # 转存通过后申请结清，家长驳回 → 存单恢复 active，款项仍锁定在定期
+        r = c.post('/api/term-deposits', headers=self.header(ch),
+                   json={'amount': 10, 'term_days': 7})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tin3 = next(t for t in reviews if t['type'] == 'term_in')
+        r = c.patch('/api/transactions/%d/review' % tin3['id'],
+                    headers=self.header(p), json={'action': 'approve'})
+        self.assertTrue(r.get_json()['ok'])
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        active = next(d for d in deps if d['status'] == 'active')
+        r = c.post('/api/term-deposits/%d/settle' % active['id'], headers=self.header(ch), json={})
+        self.assertTrue(r.get_json()['ok'])
+        reviews = c.get('/api/reviews', headers=self.header(p)).get_json()['reviews']
+        tout = next(t for t in reviews if t['type'] == 'term_early_out')
+        r = c.patch('/api/transactions/%d/review' % tout['id'],
+                    headers=self.header(p), json={'action': 'reject'})
+        self.assertTrue(r.get_json()['ok'])
+        deps = c.get('/api/term-deposits', headers=self.header(ch)).get_json()['deposits']
+        self.assertEqual(next(d for d in deps if d['id'] == active['id'])['status'], 'active')
+        acc = c.get('/api/me/account', headers=self.header(ch)).get_json()['account']
+        self.assertAlmostEqual(acc['balance'], 10.0, places=2)      # 转存已扣 10，结清驳回不返还
+        self.assertAlmostEqual(acc['term_balance'], 10.0, places=2)
 
     def test_any_parent_can_review(self):
         c = self.client
